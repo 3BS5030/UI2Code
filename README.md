@@ -1,70 +1,84 @@
-# Getting Started with Create React App
+# UI Builder (uitofront)
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+Drag-and-drop UI builder with multi-page support, responsive breakpoints, inline preview, and export to HTML or a structured React project.
 
-## Available Scripts
+## Features
+- Visual canvas with drag, resize, and selection.
+- Multi-page routing with page metadata.
+- Responsive breakpoints and per-viewport overrides.
+- Properties panel with style editor, pseudo states, and animations.
+- Custom CSS/JS per page and global CSS/JS files.
+- Session persistence (refresh-safe).
+- Export:
+  - Single page HTML.
+  - Full React project (structured files).
 
-In the project directory, you can run:
+## Quick Start
+1. Install dependencies.
+2. Start the dev server.
 
-### `npm start`
+```bash
+npm install
+npm start
+```
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+App runs at `http://localhost:3000`.
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+## How It Works
+### Pages
+Each page stores:
+- Elements tree (with parent/child relationships).
+- Body styles/attributes.
+- Custom CSS/JS text.
+- Page CSS/JS files (custom names).
 
-### `npm test`
+### Responsive
+Each element can store `responsiveStyles` for breakpoints. The generator emits media queries using `RESPONSIVE_BREAKPOINTS` from `src/core/viewports.js`.
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+### Custom CSS/JS
+The editor panel supports:
+- Page CSS files.
+- Global CSS files.
+- Page JS files.
+- Global JS files.
+- Inline custom CSS/JS.
 
-### `npm run build`
+In preview/export, all sources are concatenated and applied in this order:
+1. Generated base styles.
+2. Body responsive styles.
+3. Page CSS files.
+4. Global CSS files.
+5. Inline custom CSS.
+6. Page JS files.
+7. Global JS files.
+8. Inline custom JS.
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+## Preview Mode
+Preview runs in the same page (toggle from the navbar). It hides editing UI and renders the output as it will be exported.
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+## Export
+Use the navbar actions:
+- **Save Page**: exports a single HTML page.
+- **Save Project**: builds a full React project in `/exports` and downloads a zip.
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+## Structure
+Key files:
+- `src/store/builderStore.js` - main state + session persistence.
+- `src/store/builderFunctions.js` - element defaults and helpers.
+- `src/components/canvas/Canvas.jsx` - canvas and viewport toolbar.
+- `src/components/canvas/CanvasItem.jsx` - element rendering/drag/resize.
+- `src/components/properties/PropertiesPanel.jsx` - property editor.
+- `src/components/layout/EditorsPanel.jsx` - CSS/JS editors + JS actions.
+- `src/core/generator.js` - HTML/CSS/JS generation.
+- `src/core/exporter.js` - export to HTML/React project.
 
-### `npm run eject`
+## Development Notes
+- The UI uses Bootstrap utility classes by default for elements.
+- Images support direct URL or upload (base64).
+- Selection stays on the selected element; clicks on canvas reset to body.
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+## Scripts
+- `npm start` - dev server.
+- `npm run build` - production build.
+- `npm test` - tests.
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
-
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
-
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
-
-## Learn More
-
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
-
-To learn React, check out the [React documentation](https://reactjs.org/).
-
-### Code Splitting
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
-
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
