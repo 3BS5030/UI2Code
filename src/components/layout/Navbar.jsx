@@ -175,7 +175,7 @@ export default function AppNavbar() {
       <Navbar expand="lg" className="bg-body-tertiary">
         <Container fluid>
           <Navbar.Brand style={{ color: "black" }}>
-            UI Builder
+            UI2Code
           </Navbar.Brand>
           <Navbar.Toggle aria-controls="basic-navbar-nav" />
           <Navbar.Collapse id="basic-navbar-nav">

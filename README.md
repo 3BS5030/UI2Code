@@ -1,4 +1,4 @@
-# UI Builder (uitofront)
+# UI Builder (UI2Code)
 
 Drag-and-drop UI builder with multi-page support, responsive breakpoints, inline preview, and export to HTML or a structured React project.
 
