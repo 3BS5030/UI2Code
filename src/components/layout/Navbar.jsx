@@ -2,7 +2,8 @@ import React, { useMemo, useState } from "react";
 import { Container, Nav, Navbar, NavDropdown, Button, Modal, Form, Collapse, Table } from "react-bootstrap";
 import { useBuilderStore } from "../../store/builderStore";
 import { generatePageHtml } from "../../core/generator";
-import { exportPageZip, exportProjectZipFromFiles, buildReactProjectFiles } from "../../core/exporter";
+import { exportPageZip, exportPageImage, exportProjectZipFromFiles, buildReactProjectFiles } from "../../core/exporter";
+import { VIEWPORTS } from "../../core/viewports";
 
 const getFolder = (path) => {
   const parts = path.split("/");
@@ -47,6 +48,7 @@ export default function AppNavbar() {
   const toggleSplitEditors = useBuilderStore(state => state.toggleSplitEditors);
   const globalCssFiles = useBuilderStore(state => state.globalCssFiles);
   const globalJsFiles = useBuilderStore(state => state.globalJsFiles);
+  const viewportPreset = useBuilderStore(state => state.viewportPreset);
 
   const firstPage = pages[0] || { title: "Home", route: "/", description: "" };
   const currentPage = useMemo(
@@ -57,6 +59,7 @@ export default function AppNavbar() {
   const [showModal, setShowModal] = useState(false);
   const [showCode, setShowCode] = useState(false);
   const [showProjectModal, setShowProjectModal] = useState(false);
+  const [isExportingImage, setIsExportingImage] = useState(false);
   const [filesState, setFilesState] = useState([]);
   const [title, setTitle] = useState(firstPage.title || "Home");
   const [route, setRoute] = useState(firstPage.route || "/");
@@ -120,6 +123,11 @@ export default function AppNavbar() {
     return Array.from(folders).sort();
   }, [filesState]);
 
+  const viewportWidth = useMemo(() => {
+    const selected = VIEWPORTS.find(v => v.id === viewportPreset) || VIEWPORTS[0];
+    return Number(selected?.width) || 1200;
+  }, [viewportPreset]);
+
   const updateFilePath = (index, nextPath) => {
     setFilesState(prev => {
       const existing = new Set(prev.filter(f => !f.deleted).map(f => f.path));
@@ -166,6 +174,25 @@ export default function AppNavbar() {
 
     await exportProjectZipFromFiles(newFiles, original, pathMap, "react-project.zip");
     setShowProjectModal(false);
+  };
+
+  const handleExportImage = async (format) => {
+    if (!currentPage || isExportingImage) return;
+    setIsExportingImage(true);
+    try {
+      const globalCssText = (globalCssFiles || []).map(f => f.content || "").join("\n");
+      await exportPageImage(currentPage, {
+        format,
+        width: viewportWidth,
+        pixelRatio: 2,
+        globalCssText
+      });
+    } catch (err) {
+      console.error("Image export failed:", err);
+      alert("Image export failed. Check console for details.");
+    } finally {
+      setIsExportingImage(false);
+    }
   };
 
   // JS/CSS editors moved to EditorsPanel
@@ -243,6 +270,18 @@ export default function AppNavbar() {
               >
                 Save Page
               </Button>
+              <NavDropdown
+                title={isExportingImage ? "Saving..." : "Save Image"}
+                id="save-image-dropdown"
+                className="nav-btn nav-btn-saveimg"
+              >
+                <NavDropdown.Item disabled={isExportingImage} onClick={() => handleExportImage("png")}>
+                  PNG
+                </NavDropdown.Item>
+                <NavDropdown.Item disabled={isExportingImage} onClick={() => handleExportImage("svg")}>
+                  SVG
+                </NavDropdown.Item>
+              </NavDropdown>
               <Button
                 variant="outline-primary"
                 size="sm"

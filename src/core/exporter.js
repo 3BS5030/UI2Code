@@ -1,5 +1,6 @@
-﻿import JSZip from "jszip";
+import JSZip from "jszip";
 import { generatePageHtml, generatePageParts } from "./generator";
+import { RESPONSIVE_BREAKPOINTS } from "./viewports";
 
 const sanitizeRouteToFile = (route, fallback) => {
   if (!route || route === "/") return fallback;
@@ -64,7 +65,7 @@ const rewriteImports = (originalMap, newMap, pathMap) => {
 
     const oldPath = Array.from(pathMap.entries()).find(([, np]) => np === newPath)?.[0] || newPath;
 
-    let next = content.replace(/from\s+["']([^"']+)["']/g, (m, spec) => {
+    const next = content.replace(/from\s+["']([^"']+)["']/g, (m, spec) => {
       if (!spec.startsWith(".") && !spec.startsWith("/")) return m;
 
       const oldAbs = resolvePath(dirname(oldPath), spec);
@@ -102,6 +103,158 @@ const sanitizeFileName = (name, fallback, ext) => {
   return base.endsWith(ext) ? base : `${base}${ext}`;
 };
 
+const escapeXml = (value = "") =>
+  String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+const toKebab = (key = "") => key.replace(/[A-Z]/g, match => `-${match.toLowerCase()}`);
+
+const styleObjToString = (styles = {}) => Object.entries(styles)
+  .filter(([, v]) => v !== undefined && v !== null && v !== "")
+  .map(([key, val]) => `${toKebab(key)}:${val}`)
+  .join(";");
+
+const styleObjToStringImportant = (styles = {}) => Object.entries(styles)
+  .filter(([, v]) => v !== undefined && v !== null && v !== "")
+  .map(([key, val]) => `${toKebab(key)}:${val} !important`)
+  .join(";");
+
+const attrsToString = (attrs = {}) => {
+  const normalized = { ...(attrs || {}) };
+  if ("class" in normalized && !normalized.className) {
+    normalized.className = normalized.class;
+    delete normalized.class;
+  }
+  if ("style" in normalized) delete normalized.style;
+
+  return Object.entries(normalized)
+    .filter(([, v]) => v !== undefined && v !== null && v !== "")
+    .map(([key, val]) => {
+      const attr = key === "className" ? "class" : key;
+      return `${attr}="${escapeXml(String(val))}"`;
+    })
+    .join(" ");
+};
+
+const toSvgDataUrl = (svgString) => {
+  const encoded = encodeURIComponent(svgString)
+    .replace(/%0A/g, "")
+    .replace(/%20/g, " ");
+  return `data:image/svg+xml;charset=utf-8,${encoded}`;
+};
+
+const buildBodyResponsiveCss = (page = {}) => {
+  const bodyResponsive = page.bodyResponsive || {};
+  return Object.keys(RESPONSIVE_BREAKPOINTS).map((key) => {
+    const override = bodyResponsive[key];
+    if (!override || Object.keys(override).length === 0) return "";
+    const bp = RESPONSIVE_BREAKPOINTS[key];
+    const css = styleObjToStringImportant(override);
+    return css ? `@media ${bp.media}{.image-export-body{${css}}}` : "";
+  }).join("");
+};
+
+const buildPageImageMarkup = (page, globalCssText = "") => {
+  const { html, styleTag } = generatePageParts(page);
+  const pageCss = (page.cssFiles || []).map(f => f.content || "").join("\n");
+  const customCss = page.customCss || "";
+
+  const hasAbsolute = (page.elements || []).some(el => (el.styles || {}).position === "absolute");
+  const bodyStyles = { ...(page.bodyStyles || {}) };
+  if (hasAbsolute && !bodyStyles.position) bodyStyles.position = "relative";
+  if (!bodyStyles.minHeight) bodyStyles.minHeight = "100vh";
+
+  const responsiveBodyCss = buildBodyResponsiveCss(page);
+  const scopedStyleTag = (styleTag || "").replace(/body\s*\{/g, ".image-export-body{");
+  const extraStyle = [globalCssText, pageCss, customCss].filter(Boolean).join("\n");
+  const bodyAttrsRaw = { ...(page.bodyAttrs || {}) };
+  const extraClass = bodyAttrsRaw.className || bodyAttrsRaw.class || "";
+  if ("className" in bodyAttrsRaw) delete bodyAttrsRaw.className;
+  if ("class" in bodyAttrsRaw) delete bodyAttrsRaw.class;
+
+  const bodyAttrs = attrsToString(bodyAttrsRaw);
+  const bodyStyle = styleObjToString(bodyStyles);
+  const finalAttrs = [
+    `class="${escapeXml(["image-export-body", extraClass].filter(Boolean).join(" "))}"`,
+    bodyStyle ? `style="${escapeXml(bodyStyle)}"` : "",
+    bodyAttrs
+  ].filter(Boolean).join(" ");
+
+  return `
+    ${scopedStyleTag}
+    ${responsiveBodyCss ? `<style>${responsiveBodyCss}</style>` : ""}
+    ${extraStyle ? `<style>${extraStyle}</style>` : ""}
+    <div ${finalAttrs}>
+      ${html}
+    </div>
+  `;
+};
+
+const measureExportHeight = (markup, width) => {
+  const host = document.createElement("div");
+  host.style.position = "fixed";
+  host.style.left = "-99999px";
+  host.style.top = "0";
+  host.style.width = `${Math.max(1, Math.round(width))}px`;
+  host.style.visibility = "hidden";
+  host.style.pointerEvents = "none";
+  host.style.zIndex = "-1";
+  host.innerHTML = markup;
+  document.body.appendChild(host);
+
+  const node = host.querySelector(".image-export-body");
+  const measured = node
+    ? Math.max(node.scrollHeight, node.offsetHeight, Math.ceil(node.getBoundingClientRect().height))
+    : host.scrollHeight;
+
+  host.remove();
+  return Math.max(1, Math.ceil(measured || 1));
+};
+
+const buildSvgFromMarkup = (markup, width, height) => {
+  const safeWidth = Math.max(1, Math.round(width));
+  const safeHeight = Math.max(1, Math.round(height));
+  return `
+<svg xmlns="http://www.w3.org/2000/svg" width="${safeWidth}" height="${safeHeight}" viewBox="0 0 ${safeWidth} ${safeHeight}">
+  <foreignObject width="100%" height="100%">
+    <div xmlns="http://www.w3.org/1999/xhtml" style="width:${safeWidth}px;height:${safeHeight}px;overflow:hidden;">
+      ${markup}
+    </div>
+  </foreignObject>
+</svg>`;
+};
+
+const renderSvgToPngBlob = (svgString, width, height, pixelRatio = 2) => new Promise((resolve, reject) => {
+  const canvas = document.createElement("canvas");
+  const ratio = Math.max(1, Math.min(4, Number(pixelRatio) || 2));
+  canvas.width = Math.max(1, Math.round(width * ratio));
+  canvas.height = Math.max(1, Math.round(height * ratio));
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    reject(new Error("Canvas rendering is not available."));
+    return;
+  }
+
+  const image = new Image();
+  image.onload = () => {
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.drawImage(image, 0, 0, width, height);
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error("Failed to generate PNG blob."));
+        return;
+      }
+      resolve(blob);
+    }, "image/png");
+  };
+  image.onerror = () => reject(new Error("Failed to render SVG to PNG."));
+  image.src = toSvgDataUrl(svgString);
+});
+
 export const exportPageZip = async (page) => {
   const zip = new JSZip();
   const html = generatePageHtml(page);
@@ -110,6 +263,34 @@ export const exportPageZip = async (page) => {
 
   const blob = await zip.generateAsync({ type: "blob" });
   downloadBlob(blob, `page-${fileName.replace(/\.html$/, "")}.zip`);
+};
+
+export const exportPageImage = async (
+  page,
+  {
+    format = "png",
+    width = 1200,
+    pixelRatio = 2,
+    globalCssText = ""
+  } = {}
+) => {
+  if (!page) throw new Error("No page selected.");
+
+  const safeFormat = String(format).toLowerCase() === "svg" ? "svg" : "png";
+  const safeWidth = Math.max(1, Math.round(Number(width) || 1200));
+  const markup = buildPageImageMarkup(page, globalCssText);
+  const height = measureExportHeight(markup, safeWidth);
+  const svgString = buildSvgFromMarkup(markup, safeWidth, height);
+  const base = sanitizeRouteToFile(page.route, "page").replace(/\.html$/, "");
+
+  if (safeFormat === "svg") {
+    const svgBlob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+    downloadBlob(svgBlob, `${base}.svg`);
+    return;
+  }
+
+  const pngBlob = await renderSvgToPngBlob(svgString, safeWidth, height, pixelRatio);
+  downloadBlob(pngBlob, `${base}.png`);
 };
 
 const buildReactProjectFiles = (pages, globalCssFiles = [], globalJsFiles = []) => {

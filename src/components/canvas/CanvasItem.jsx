@@ -266,7 +266,7 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
       let clampedLeft = nextLeft;
       let clampedTop = nextTop;
 
-      const parentNow = node.offsetParent;
+      const parentNow = node.offsetParent || document.body;
       const parentNowRect = parentNow?.getBoundingClientRect();
       const nodeRect = node.getBoundingClientRect();
 
@@ -340,7 +340,9 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
       const nextHeight = Math.max(20, resizeRef.current.startHeight + dy);
 
       const parentRect = node.offsetParent?.getBoundingClientRect();
-      if (parentRect && parentRect.width > 0 && parentRect.height > 0) {
+      const isSmallScreen = window.innerWidth < 768;
+
+      if (parentRect && parentRect.width > 0 && parentRect.height > 0 && !isSmallScreen) {
         const widthPct = Math.max(1, Math.round((nextWidth / parentRect.width) * 100));
         const heightPct = Math.max(1, Math.round((nextHeight / parentRect.height) * 100));
         const nextStyles = {
