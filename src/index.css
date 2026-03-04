@@ -1,6 +1,7 @@
 @import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
 
 :root {
+  --navbar-h: 64px;
   --bg-0: #0b0f1a;
   --bg-1: #0f172a;
   --bg-2: #111827;
@@ -26,6 +27,7 @@
   display: flex;
   flex-direction: column;
   height: 100vh;
+  overflow: hidden;
   background: radial-gradient(1200px 800px at 15% 10%, rgba(56, 189, 248, 0.16), transparent 60%),
     radial-gradient(900px 700px at 85% 0%, rgba(251, 113, 133, 0.15), transparent 55%),
     linear-gradient(180deg, var(--bg-0), var(--bg-2));
@@ -34,13 +36,16 @@
 .builder-layout {
   display: flex;
   flex: 1;
+  align-items: flex-start;
   gap: 12px;
   padding: 12px;
+  min-height: 0;
+  overflow: hidden;
 }
 
 /* ===== Navbar ===== */
 .app-container > nav {
-  height: 64px;
+  height: var(--navbar-h);
   backdrop-filter: blur(12px);
   background: rgba(255, 255, 255, 0.7) !important;
   z-index: 1100;
@@ -171,6 +176,12 @@
   border-color: rgba(225, 29, 72, 0.7) !important;
 }
 
+.nav-btn-undo {
+  color: #334155 !important;
+  border-color: rgba(51, 65, 85, 0.55) !important;
+  background: rgba(148, 163, 184, 0.12) !important;
+}
+
 .nav-btn-savepage {
   color: #0f172a !important;
   border-color: rgba(56, 189, 248, 0.9) !important;
@@ -248,10 +259,13 @@
   background: var(--panel);
   box-shadow: var(--shadow-1);
   animation: panelIn 420ms ease;
-  max-height: calc(100vh - 120px);
+  height: calc(100vh - var(--navbar-h) - 24px);
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  position: sticky;
+  top: 12px;
+  align-self: flex-start;
 }
 
 .sidebar>* {
@@ -264,6 +278,8 @@
 /* ===== Canvas ===== */
 .main-canvas {
   flex: 1;
+  min-height: 0;
+  height: calc(100vh - var(--navbar-h) - 24px);
   padding: 6px;
   background: transparent;
   overflow: auto;
@@ -377,10 +393,13 @@
   background: var(--panel);
   box-shadow: var(--shadow-1);
   animation: panelIn 420ms ease;
-  max-height: calc(100vh - 120px);
+  height: calc(100vh - var(--navbar-h) - 24px);
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  position: sticky;
+  top: 12px;
+  align-self: flex-start;
 }
 
 .properties {
@@ -1093,15 +1112,23 @@ body,
 }
 
 @media (max-width: 992px) {
+  .app-container {
+    height: auto;
+    min-height: 100vh;
+    overflow: auto;
+  }
+
   .builder-layout {
     flex-direction: column;
+    overflow: visible;
   }
 
   .sidebar,
   .properties-bar {
     width: 100%;
-    max-height: none;
+    height: auto;
     overflow: visible;
+    position: static;
   }
 
   .sidebar>*,
@@ -1123,6 +1150,7 @@ body,
   }
 
   .main-canvas {
+    height: auto;
     min-height: 40vh;
     overflow: visible;
   }

@@ -240,6 +240,11 @@ export default function Canvas({ previewMode = false, belowToolbar = null }) {
     window.dispatchEvent(new Event("ui2code:open-add-page-modal"));
   };
 
+  const handleUndo = () => {
+    if (typeof window === "undefined") return;
+    window.dispatchEvent(new Event("ui2code:undo-request"));
+  };
+
   useEffect(() => {
     if (!combinedJs) return undefined;
     try {
@@ -287,6 +292,14 @@ export default function Canvas({ previewMode = false, belowToolbar = null }) {
         </button>
 
         <div className="canvas-toolbar__actions">
+          <button
+            type="button"
+            className="btn btn-sm nav-btn nav-btn-undo"
+            onClick={handleUndo}
+            title="Undo (Ctrl+Z)"
+          >
+            Undo
+          </button>
           <button
             type="button"
             className="btn btn-sm nav-btn nav-btn-css"
