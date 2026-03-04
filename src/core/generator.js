@@ -1,4 +1,5 @@
 import { RESPONSIVE_BREAKPOINTS } from "./viewports";
+import { normalizePositionStyles, shouldKeepManualPosition } from "../utils/styleParser";
 const VOID_TAGS = new Set([
   "area",
   "base",
@@ -111,6 +112,11 @@ const splitStyles = (styles = {}, elementType) => {
     "top",
     "right",
     "bottom",
+    "margin",
+    "marginTop",
+    "marginRight",
+    "marginBottom",
+    "marginLeft",
     "display",
     "zIndex"
   ]);
@@ -198,11 +204,15 @@ export const generatePageParts = (page) => {
       delete attrs.class;
     }
 
-    const { layout, visual } = splitStyles(element.styles || {}, element.type || "div");
+    const normalizedBaseStyles = normalizePositionStyles(
+      element.styles || {},
+      shouldKeepManualPosition(element)
+    );
+    const { layout, visual } = splitStyles(normalizedBaseStyles, element.type || "div");
 
     const children = (byParent.get(element.id) || []).map(renderElement);
     const hasMultipleChildren = children.length > 1;
-    const hasDisplayOverride = Object.prototype.hasOwnProperty.call(element.styles || {}, "display");
+    const hasDisplayOverride = Object.prototype.hasOwnProperty.call(normalizedBaseStyles || {}, "display");
 
     if (CONTAINER_TYPES.has(tag) && hasMultipleChildren && !hasDisplayOverride) {
       if (!visual.display) visual.display = "grid";
@@ -262,7 +272,11 @@ export const generatePageParts = (page) => {
       if (!override || Object.keys(override).length === 0) return;
 
       const bp = RESPONSIVE_BREAKPOINTS[key];
-      const { layout: rLayout, visual: rVisual } = splitStyles(override, element.type || "div");
+      const normalizedOverride = normalizePositionStyles(
+        override,
+        shouldKeepManualPosition(element)
+      );
+      const { layout: rLayout, visual: rVisual } = splitStyles(normalizedOverride, element.type || "div");
       const wrapperCss = styleObjToStringImportant(rLayout);
       const visualCss = styleObjToStringImportant(rVisual);
 
@@ -308,7 +322,10 @@ export const generatePageHtml = (page) => {
 
   const bodyStyles = { ...(page.bodyStyles || {}) };
   const bodyResponsive = page.bodyResponsive || {};
-  const hasAbsolute = (page.elements || []).some(el => (el.styles || {}).position === "absolute");
+  const hasAbsolute = (page.elements || []).some((el) => {
+    const normalized = normalizePositionStyles(el.styles || {}, shouldKeepManualPosition(el));
+    return normalized.position === "absolute";
+  });
   if (hasAbsolute && !bodyStyles.position) {
     bodyStyles.position = "relative";
   }

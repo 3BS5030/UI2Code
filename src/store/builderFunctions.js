@@ -1,5 +1,19 @@
 ﻿import { defaultStyles } from "../core/defaultStyles";
 
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
+
+const isManualPositionValue = (value) => {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return Boolean(normalized && normalized !== "static");
+};
+
+const resolveManualPositionFromPatch = (element, patchedStyles, patch) => {
+  if (hasOwn(patch, "position")) {
+    return isManualPositionValue(patchedStyles.position);
+  }
+  return Boolean(element.manualPosition);
+};
+
 // ===== Add Element =====
 export function addElement(initialProps, type, parentId = null) {
 
@@ -37,6 +51,7 @@ export function addElement(initialProps, type, parentId = null) {
     lockedToParent: Boolean(parentId),
     props: initialProps,
     styles: styles,
+    manualPosition: false,
     attrs: defaultClassName ? { className: defaultClassName } : {},
     responsiveStyles: {},
     pseudoStyles: {
@@ -85,15 +100,20 @@ export function updateResponsiveStyles(elements, id, viewportKey, newStyles) {
   const updatedElements = elements.map(element => {
     if (element.id === id) {
       const current = element.responsiveStyles || {};
+      const nextResponsive = {
+        ...current,
+        [viewportKey]: {
+          ...(current[viewportKey] || {}),
+          ...newStyles
+        }
+      };
+      const nextManualPosition = hasOwn(newStyles, "position")
+        ? isManualPositionValue(newStyles.position)
+        : Boolean(element.manualPosition);
       return {
         ...element,
-        responsiveStyles: {
-          ...current,
-          [viewportKey]: {
-            ...(current[viewportKey] || {}),
-            ...newStyles
-          }
-        }
+        responsiveStyles: nextResponsive,
+        manualPosition: nextManualPosition
       };
     }
 
@@ -108,12 +128,17 @@ export function setResponsiveStyles(elements, id, viewportKey, styles) {
   const updatedElements = elements.map(element => {
     if (element.id === id) {
       const current = element.responsiveStyles || {};
+      const nextResponsive = {
+        ...current,
+        [viewportKey]: { ...styles }
+      };
+      const nextManualPosition = hasOwn(styles, "position")
+        ? isManualPositionValue(styles.position)
+        : Boolean(element.manualPosition);
       return {
         ...element,
-        responsiveStyles: {
-          ...current,
-          [viewportKey]: { ...styles }
-        }
+        responsiveStyles: nextResponsive,
+        manualPosition: nextManualPosition
       };
     }
 
@@ -129,13 +154,14 @@ export function updateStyles(elements, id, newStyles) {
   const updatedElements = elements.map(element => {
 
     if (element.id === id) {
+      const nextStyles = {
+        ...element.styles,
+        ...newStyles
+      };
       return {
         ...element,
-
-        styles: {
-          ...element.styles,
-          ...newStyles
-        }
+        styles: nextStyles,
+        manualPosition: resolveManualPositionFromPatch(element, nextStyles, newStyles)
       };
     }
 
@@ -153,7 +179,8 @@ export function setStyles(elements, id, styles) {
     if (element.id === id) {
       return {
         ...element,
-        styles: { ...styles }
+        styles: { ...styles },
+        manualPosition: isManualPositionValue(styles?.position)
       };
     }
 

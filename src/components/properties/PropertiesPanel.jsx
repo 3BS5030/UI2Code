@@ -9,7 +9,20 @@ const STYLE_PRESETS = [
     "maxWidth",
     "maxHeight",
     "color",
+    "background",
     "backgroundColor",
+    "backgroundImage",
+    "backgroundPosition",
+    "backgroundPositionX",
+    "backgroundPositionY",
+    "backgroundSize",
+    "backgroundRepeat",
+    "backgroundRepeatX",
+    "backgroundRepeatY",
+    "backgroundAttachment",
+    "backgroundOrigin",
+    "backgroundClip",
+    "backgroundBlendMode",
     "opacity",
     "fontSize",
     "fontWeight",
@@ -143,6 +156,16 @@ const KEYWORD_OPTIONS = {
     maxHeight: ["none", "fit-content", "max-content", "min-content", "100%"],
     objectFit: ["fill", "contain", "cover", "none", "scale-down"],
     objectPosition: ["center", "top", "bottom", "left", "right"],
+    backgroundImage: ["none"],
+    backgroundPosition: ["left top", "left center", "left bottom", "center top", "center center", "center bottom", "right top", "right center", "right bottom"],
+    backgroundSize: ["auto", "cover", "contain"],
+    backgroundRepeat: ["repeat", "repeat-x", "repeat-y", "no-repeat", "space", "round"],
+    backgroundRepeatX: ["repeat", "no-repeat"],
+    backgroundRepeatY: ["repeat", "no-repeat"],
+    backgroundAttachment: ["scroll", "fixed", "local"],
+    backgroundOrigin: ["padding-box", "border-box", "content-box"],
+    backgroundClip: ["border-box", "padding-box", "content-box", "text"],
+    backgroundBlendMode: ["normal", "multiply", "screen", "overlay", "darken", "lighten", "color-dodge", "color-burn", "hard-light", "soft-light", "difference", "exclusion", "hue", "saturation", "color", "luminosity"],
     display: ["block", "inline", "inline-block", "flex", "grid", "none"],
     position: ["static", "relative", "absolute", "fixed", "sticky"],
     overflow: ["visible", "hidden", "scroll", "auto", "clip"],
@@ -200,6 +223,12 @@ const parseUnitValue = (value, fallbackUnit = "px") => {
 const buildUnitValue = (num, unit) => {
     if (num === "" || num === null || num === undefined) return "";
     return `${num}${unit || ""}`;
+};
+
+const buildBackgroundImageValue = (value) => {
+    if (!value) return "";
+    const safe = String(value).trim().replace(/"/g, "\\\"");
+    return safe ? `url("${safe}")` : "";
 };
 
 export default function PropertiesPanel() {
@@ -390,6 +419,18 @@ export default function PropertiesPanel() {
         } else {
             setPseudoStyles(selectedId, styleTarget, next);
         }
+    };
+
+    const handleBackgroundImageUpload = (file, onValue) => {
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+            const result = reader.result;
+            if (typeof result === "string") {
+                onValue(buildBackgroundImageValue(result));
+            }
+        };
+        reader.readAsDataURL(file);
     };
 
     const renderUnitInput = (key, label) => {
@@ -688,6 +729,25 @@ export default function PropertiesPanel() {
                                 ))}
                             </select>
                         </div>
+                    ) : key === "backgroundImage" ? (
+                        <div className="d-flex flex-column gap-1 w-100">
+                            <input
+                                className="form-control form-control-sm"
+                                value={currentStyles[key]}
+                                placeholder='url("...")'
+                                onChange={e => handleStyleChange(key, e.target.value)}
+                            />
+                            <input
+                                type="file"
+                                accept="image/*"
+                                className="form-control form-control-sm"
+                                onChange={(e) => {
+                                    const file = e.target.files?.[0];
+                                    handleBackgroundImageUpload(file, (value) => handleStyleChange(key, value));
+                                    e.target.value = "";
+                                }}
+                            />
+                        </div>
                     ) : (
                         <input
                             className="form-control form-control-sm"
@@ -740,6 +800,20 @@ export default function PropertiesPanel() {
                     Add
                 </button>
             </div>
+            {styleKey === "backgroundImage" && (
+                <div className="mb-3">
+                    <input
+                        type="file"
+                        accept="image/*"
+                        className="form-control form-control-sm"
+                        onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            handleBackgroundImageUpload(file, (value) => setStyleValue(value));
+                            e.target.value = "";
+                        }}
+                    />
+                </div>
+            )}
 
             {!isBody && selectedElement && (
                 <>

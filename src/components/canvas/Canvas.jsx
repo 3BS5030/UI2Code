@@ -4,6 +4,21 @@ import { useBuilderStore } from "../../store/builderStore";
 import CanvasItem from "./CanvasItem";
 import { VIEWPORTS } from "../../core/viewports";
 
+const toCamel = (key) =>
+  key.replace(/-([a-z])/g, (_, char) => char.toUpperCase());
+
+const normalizeInlineStyles = (styles = {}) => {
+  return Object.entries(styles).reduce((acc, [rawKey, rawValue]) => {
+    if (rawValue === undefined || rawValue === null || rawValue === "") return acc;
+    const key = rawKey.startsWith("--") ? rawKey : toCamel(rawKey);
+    const value = typeof rawValue === "string"
+      ? rawValue.replace(/\s*!important\s*$/i, "").trim()
+      : rawValue;
+    acc[key] = value;
+    return acc;
+  }, {});
+};
+
 export default function Canvas({ previewMode = false }) {
   const currentPageId = useBuilderStore(state => state.currentPageId);
   const pages = useBuilderStore(state => state.pages);
@@ -40,13 +55,17 @@ export default function Canvas({ previewMode = false }) {
 
   const viewportConfig = VIEWPORTS.find(v => v.id === viewportPreset) || VIEWPORTS[0];
   const responsiveOverride = bodyResponsive[viewportKey] || {};
-  const mergedBodyStyles = viewportKey === "base"
+  const rawBodyStyles = viewportKey === "base"
     ? { ...bodyStyles }
     : { ...bodyStyles, ...responsiveOverride };
   if (viewportKey !== "base" && !Object.prototype.hasOwnProperty.call(responsiveOverride, "minWidth")) {
-    delete mergedBodyStyles.minWidth;
+    delete rawBodyStyles.minWidth;
   }
+  const mergedBodyStyles = normalizeInlineStyles(rawBodyStyles);
   if (!mergedBodyStyles.minHeight) mergedBodyStyles.minHeight = "100vh";
+  if (!mergedBodyStyles.background && !mergedBodyStyles.backgroundColor) {
+    mergedBodyStyles.backgroundColor = "#ffffff";
+  }
 
   const viewportWidth = viewportConfig.width === "auto"
     ? "100%"
@@ -118,9 +137,8 @@ export default function Canvas({ previewMode = false }) {
 
       <div className="canvas-viewport" style={{ width: viewportWidth }}>
         <Container
-          className="bg-white border rounded shadow-sm p-4 position-relative page-root"
+          className="border rounded shadow-sm p-4 position-relative page-root"
           style={{ ...(mergedBodyStyles || {}) }}
-          minHeight={"160vh"}
           {...safeBodyAttrs}
           ref={pageRootRef}
         >

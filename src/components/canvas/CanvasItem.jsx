@@ -1,5 +1,6 @@
 ﻿import React, { useRef, useState } from "react";
 import { useBuilderStore } from "../../store/builderStore";
+import { normalizePositionStyles, shouldKeepManualPosition } from "../../utils/styleParser";
 
 const VOID_TAGS = new Set([
   "area",
@@ -108,6 +109,30 @@ const SIZE_ON_CONTENT = new Set([
   "svg"
 ]);
 
+const parseLengthValue = (value) => {
+  if (value === undefined || value === null || value === "") return null;
+  const parsed = typeof value === "number" ? value : parseFloat(String(value));
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const parseMarginShorthand = (value, side) => {
+  if (typeof value !== "string") return null;
+  const parts = value.trim().split(/\s+/);
+  if (parts.length === 0) return null;
+  const [top, right = top, bottom = top, left = right] = parts;
+  const bySide = { top, right, bottom, left };
+  return parseLengthValue(bySide[side]);
+};
+
+const readMarginSide = (styles = {}, side) => {
+  const sideKey = `margin${side[0].toUpperCase()}${side.slice(1)}`;
+  const sideVal = parseLengthValue(styles[sideKey]);
+  if (sideVal !== null) return sideVal;
+  const shorthandVal = parseMarginShorthand(styles.margin, side);
+  if (shorthandVal !== null) return shorthandVal;
+  return 0;
+};
+
 const splitStyles = (styles = {}, elementType) => {
   const layoutKeys = new Set([
     "position",
@@ -115,6 +140,11 @@ const splitStyles = (styles = {}, elementType) => {
     "top",
     "right",
     "bottom",
+    "margin",
+    "marginTop",
+    "marginRight",
+    "marginBottom",
+    "marginLeft",
     "display",
     "zIndex"
   ]);
@@ -198,8 +228,8 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
     dragging: false,
     startX: 0,
     startY: 0,
-    startLeft: 0,
-    startTop: 0
+    startMarginLeft: 0,
+    startMarginTop: 0
   });
   const resizeRef = useRef({
     resizing: false,
@@ -235,23 +265,23 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
     const node = itemRef.current;
     if (!node) return;
 
-    const parent = node.offsetParent;
-    const parentRect = parent?.getBoundingClientRect();
-    const rect = node.getBoundingClientRect();
-
-    const currentLeft = typeof element.styles?.left === "string"
-      ? parseFloat(element.styles.left)
-      : (parentRect ? rect.left - parentRect.left : 0);
-    const currentTop = typeof element.styles?.top === "string"
-      ? parseFloat(element.styles.top)
-      : (parentRect ? rect.top - parentRect.top : 0);
+    const responsiveStyles = element.responsiveStyles?.[viewportKey] || {};
+    const activeStyles = viewportKey === "base"
+      ? (element.styles || {})
+      : { ...(element.styles || {}), ...responsiveStyles };
+    const normalizedActiveStyles = normalizePositionStyles(
+      activeStyles,
+      shouldKeepManualPosition(element)
+    );
+    const currentMarginLeft = readMarginSide(normalizedActiveStyles, "left");
+    const currentMarginTop = readMarginSide(normalizedActiveStyles, "top");
 
     dragRef.current = {
       dragging: true,
       startX: e.clientX,
       startY: e.clientY,
-      startLeft: currentLeft,
-      startTop: currentTop
+      startMarginLeft: currentMarginLeft,
+      startMarginTop: currentMarginTop
     };
 
     const onMove = (moveEvent) => {
@@ -260,27 +290,20 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
       const dx = moveEvent.clientX - dragRef.current.startX;
       const dy = moveEvent.clientY - dragRef.current.startY;
 
-      const nextLeft = dragRef.current.startLeft + dx;
-      const nextTop = dragRef.current.startTop + dy;
+      const nextLeft = dragRef.current.startMarginLeft + dx;
+      const nextTop = dragRef.current.startMarginTop + dy;
 
-      let clampedLeft = nextLeft;
-      let clampedTop = nextTop;
-
-      const parentNow = node.offsetParent || document.body;
-      const parentNowRect = parentNow?.getBoundingClientRect();
-      const nodeRect = node.getBoundingClientRect();
-
-      if (parentNowRect) {
-        const maxLeft = Math.max(0, parentNowRect.width - nodeRect.width);
-        const maxTop = Math.max(0, parentNowRect.height - nodeRect.height);
-        clampedLeft = Math.min(Math.max(0, nextLeft), maxLeft);
-        clampedTop = Math.min(Math.max(0, nextTop), maxTop);
-      }
+      const clampedLeft = Math.max(0, nextLeft);
+      const clampedTop = Math.max(0, nextTop);
 
       const nextStyles = {
-        position: "absolute",
-        left: `${clampedLeft}px`,
-        top: `${clampedTop}px`
+        position: "",
+        left: "",
+        top: "",
+        right: "",
+        bottom: "",
+        marginLeft: `${Math.round(clampedLeft)}px`,
+        marginTop: `${Math.round(clampedTop)}px`
       };
 
       if (viewportKey === "base") {
@@ -290,7 +313,12 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
       }
 
       if (!element.parentId && autoExpandBody) {
-        const neededHeight = Math.ceil(clampedTop + nodeRect.height + 40);
+        const parentNow = node.offsetParent || document.body;
+        const parentNowRect = parentNow?.getBoundingClientRect();
+        const nodeRect = node.getBoundingClientRect();
+        const neededHeight = parentNowRect
+          ? Math.ceil((nodeRect.bottom - parentNowRect.top) + 40)
+          : Math.ceil(nodeRect.bottom + 40);
         const nextBody = {};
         if (Number.isFinite(neededHeight)) nextBody.minHeight = `max(100vh, ${neededHeight}px)`;
 
@@ -319,6 +347,7 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
 
     const node = itemRef.current;
     if (!node) return;
+    const keepManualPosition = shouldKeepManualPosition(element);
 
     const rect = node.getBoundingClientRect();
 
@@ -342,7 +371,7 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
       const parentRect = node.offsetParent?.getBoundingClientRect();
       const isSmallScreen = window.innerWidth < 768;
 
-      if (parentRect && parentRect.width > 0 && parentRect.height > 0 && !isSmallScreen) {
+      if (keepManualPosition && parentRect && parentRect.width > 0 && parentRect.height > 0 && !isSmallScreen) {
         const widthPct = Math.max(1, Math.round((nextWidth / parentRect.width) * 100));
         const heightPct = Math.max(1, Math.round((nextHeight / parentRect.height) * 100));
         const nextStyles = {
@@ -370,7 +399,8 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
         const parentRect = node.offsetParent.getBoundingClientRect();
         const nodeRect = node.getBoundingClientRect();
         const bottom = nodeRect.bottom - parentRect.top;
-        const needed = Math.ceil(bottom + 40);
+        const scrollHeight = node.offsetParent.scrollHeight || 0;
+        const needed = Math.ceil(Math.max(bottom, scrollHeight) + 40);
         const nextBody = {};
         if (Number.isFinite(needed)) nextBody.minHeight = `max(100vh, ${needed}px)`;
         if (Object.keys(nextBody).length) {
@@ -443,9 +473,13 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
 
   const elementType = element.type || "div";
   const responsiveStyles = element.responsiveStyles?.[viewportKey] || {};
-  const mergedStyles = viewportKey === "base"
+  const rawMergedStyles = viewportKey === "base"
     ? (element.styles || {})
     : { ...(element.styles || {}), ...responsiveStyles };
+  const mergedStyles = normalizePositionStyles(
+    rawMergedStyles,
+    shouldKeepManualPosition(element)
+  );
   const { layout, visual } = splitStyles(mergedStyles, elementType);
   const animation = element.animation || {};
 
@@ -597,6 +631,14 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
 
     if (VOID_TAGS.has(tag)) {
       return React.createElement(tag, props);
+    }
+
+    if (tag === "textarea") {
+      const nextProps = { ...props };
+      if (nextProps.value === undefined && nextProps.defaultValue === undefined && element.props?.text !== undefined) {
+        nextProps.defaultValue = element.props.text;
+      }
+      return React.createElement(tag, nextProps);
     }
 
     const content = element.props?.text ?? tag;

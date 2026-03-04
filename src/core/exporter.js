@@ -1,6 +1,7 @@
 import JSZip from "jszip";
 import { generatePageHtml, generatePageParts } from "./generator";
 import { RESPONSIVE_BREAKPOINTS } from "./viewports";
+import { normalizePositionStyles, shouldKeepManualPosition } from "../utils/styleParser";
 
 const sanitizeRouteToFile = (route, fallback) => {
   if (!route || route === "/") return fallback;
@@ -162,7 +163,10 @@ const buildPageImageMarkup = (page, globalCssText = "") => {
   const pageCss = (page.cssFiles || []).map(f => f.content || "").join("\n");
   const customCss = page.customCss || "";
 
-  const hasAbsolute = (page.elements || []).some(el => (el.styles || {}).position === "absolute");
+  const hasAbsolute = (page.elements || []).some((el) => {
+    const normalized = normalizePositionStyles(el.styles || {}, shouldKeepManualPosition(el));
+    return normalized.position === "absolute";
+  });
   const bodyStyles = { ...(page.bodyStyles || {}) };
   if (hasAbsolute && !bodyStyles.position) bodyStyles.position = "relative";
   if (!bodyStyles.minHeight) bodyStyles.minHeight = "100vh";
