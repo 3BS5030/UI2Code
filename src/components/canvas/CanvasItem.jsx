@@ -1,5 +1,6 @@
 ﻿import React, { useRef, useState } from "react";
 import { useBuilderStore } from "../../store/builderStore";
+import { useEffect } from "react";
 import { normalizePositionStyles, shouldKeepManualPosition } from "../../utils/styleParser";
 
 const VOID_TAGS = new Set([
@@ -99,6 +100,48 @@ const styleObjToCss = (styles = {}) => {
     .join("");
 };
 
+const escapeHtml = (value = "") =>
+  String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+const textToRichHtml = (value = "") =>
+  escapeHtml(String(value)).replace(/\n/g, "<br>");
+
+const richHtmlToPlainText = (html = "") => {
+  if (typeof document === "undefined") return String(html).replace(/<br\s*\/?>/gi, "\n");
+  const holder = document.createElement("div");
+  holder.innerHTML = String(html || "");
+  return holder.innerText || holder.textContent || "";
+};
+
+const sanitizeRichHtml = (html = "") => {
+  if (typeof document === "undefined") return String(html || "");
+  const holder = document.createElement("div");
+  holder.innerHTML = String(html || "");
+
+  holder.querySelectorAll("script,style,iframe,object,embed").forEach((node) => node.remove());
+  holder.querySelectorAll("*").forEach((node) => {
+    const attrs = Array.from(node.attributes || []);
+    attrs.forEach((attr) => {
+      const name = attr.name.toLowerCase();
+      if (name.startsWith("on")) {
+        node.removeAttribute(attr.name);
+        return;
+      }
+      if (name === "style") {
+        const safeValue = String(attr.value || "")
+          .replace(/expression\s*\([^)]*\)/gi, "")
+          .replace(/url\s*\(\s*['"]?\s*javascript:[^)]+\)/gi, "");
+        node.setAttribute("style", safeValue);
+      }
+    });
+  });
+
+  return holder.innerHTML;
+};
+
 const SIZE_ON_CONTENT = new Set([
   "img",
   "image",
@@ -114,6 +157,41 @@ const parseLengthValue = (value) => {
   const parsed = typeof value === "number" ? value : parseFloat(String(value));
   return Number.isFinite(parsed) ? parsed : null;
 };
+
+const parseNumericWithUnit = (value, fallbackValue = "", fallbackUnit = "px") => {
+  if (value === undefined || value === null || value === "") {
+    return { value: fallbackValue, unit: fallbackUnit };
+  }
+  if (typeof value === "number") {
+    return { value: String(value), unit: fallbackUnit };
+  }
+  const text = String(value).trim();
+  const match = text.match(/^(-?\d*\.?\d+)\s*([a-z%]*)$/i);
+  if (!match) return { value: fallbackValue, unit: fallbackUnit };
+  return {
+    value: match[1],
+    unit: match[2] || fallbackUnit
+  };
+};
+
+const normalizeHexColor = (value, fallback = "#111827") => {
+  const text = String(value || "").trim();
+  const hex3 = /^#([0-9a-f]{3})$/i;
+  const hex6 = /^#([0-9a-f]{6})$/i;
+  const asHex3 = text.match(hex3);
+  if (asHex3) {
+    const [r, g, b] = asHex3[1].split("");
+    return `#${r}${r}${g}${g}${b}${b}`.toLowerCase();
+  }
+  if (hex6.test(text)) return text.toLowerCase();
+  return fallback;
+};
+
+const stripClassToken = (className = "", token = "") =>
+  String(className || "")
+    .split(/\s+/)
+    .filter((part) => part && part !== token)
+    .join(" ");
 
 const parseMarginShorthand = (value, side) => {
   if (typeof value !== "string") return null;
@@ -194,6 +272,20 @@ const splitStyles = (styles = {}, elementType) => {
   return { layout, visual };
 };
 
+const normalizeBorderValue = (value = "") =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+
+const HELPER_DASHED_BORDERS = new Set([
+  normalizeBorderValue("1px dashed #93c5fd"),
+  normalizeBorderValue("1px dashed #86efac")
+]);
+
+const isHelperDashedBorder = (value) =>
+  HELPER_DASHED_BORDERS.has(normalizeBorderValue(value));
+
 const isInternalRoute = (href) => {
   if (!href) return false;
   if (href.startsWith("http://") || href.startsWith("https://")) return false;
@@ -210,7 +302,21 @@ const isDescendant = (elements, parentId, childId) => {
   return false;
 };
 
-export default function CanvasItem({ element, elements, onSelect, previewMode = false }) {
+const isConnectedToRoot = (byId, id) => {
+  let current = byId.get(id);
+  const visited = new Set();
+  while (current) {
+    if (visited.has(current.id)) return false;
+    visited.add(current.id);
+    if (current.parentId === null || current.parentId === undefined) return true;
+    current = byId.get(current.parentId);
+  }
+  return false;
+};
+
+export default function CanvasItem({ element, elements, onSelect, previewMode = false, readOnly = false }) {
+  const selectedElementId = useBuilderStore(state => state.selectedElementId);
+  const updateProps = useBuilderStore(state => state.updateProps);
   const updateStyles = useBuilderStore(state => state.updateStyles);
   const updateResponsiveStyles = useBuilderStore(state => state.updateResponsiveStyles);
   const updateBodyStyles = useBuilderStore(state => state.updateBodyStyles);
@@ -224,6 +330,9 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
   const setElementParent = useBuilderStore(state => state.setElementParent);
   const setElementLock = useBuilderStore(state => state.setElementLock);
   const itemRef = useRef(null);
+  const inlineEditorRef = useRef(null);
+  const savedRangeRef = useRef(null);
+  const quickMenuRef = useRef(null);
   const dragRef = useRef({
     dragging: false,
     startX: 0,
@@ -240,9 +349,172 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
   });
 
   const [showMenu, setShowMenu] = useState(false);
+  const [isEditingInline, setIsEditingInline] = useState(false);
+  const [inlineHtml, setInlineHtml] = useState(
+    sanitizeRichHtml(String(element.props?.html ?? textToRichHtml(element.props?.text ?? "")))
+  );
+  const [toolbarTextColor, setToolbarTextColor] = useState("#111827");
+  const [toolbarBgColor, setToolbarBgColor] = useState("#fef08a");
+  const [toolbarFontFamily, setToolbarFontFamily] = useState("inherit");
+  const [toolbarFontSize, setToolbarFontSize] = useState("16");
+  const [toolbarBlock, setToolbarBlock] = useState("p");
+  const [toolbarInlineTag, setToolbarInlineTag] = useState("span");
+  const [quickStyleMenu, setQuickStyleMenu] = useState({ open: false, x: 0, y: 0 });
+  const [quickDraft, setQuickDraft] = useState({
+    textColor: "#111827",
+    bgColor: "#ffffff",
+    fontWeight: "normal",
+    textAlign: "left",
+    display: "",
+    fontSizeValue: "16",
+    fontSizeUnit: "px",
+    paddingValue: "",
+    paddingUnit: "px",
+    marginValue: "",
+    marginUnit: "px",
+    radiusValue: "",
+    radiusUnit: "px",
+    gapValue: "",
+    gapUnit: "px"
+  });
+  const currentElementHtml = sanitizeRichHtml(
+    String(element.props?.html ?? textToRichHtml(element.props?.text ?? ""))
+  );
+
+  const makeQuickDraftFromStyles = (styles = {}) => {
+    const fontSize = parseNumericWithUnit(styles.fontSize, "16", "px");
+    const padding = parseNumericWithUnit(styles.padding, "", "px");
+    const margin = parseNumericWithUnit(styles.margin, "", "px");
+    const radius = parseNumericWithUnit(styles.borderRadius, "", "px");
+    const gap = parseNumericWithUnit(styles.gap, "", "px");
+
+    return {
+      textColor: normalizeHexColor(styles.color, "#111827"),
+      bgColor: normalizeHexColor(styles.backgroundColor, "#ffffff"),
+      fontWeight: String(styles.fontWeight || "normal"),
+      textAlign: String(styles.textAlign || "left"),
+      display: String(styles.display || ""),
+      fontSizeValue: fontSize.value,
+      fontSizeUnit: fontSize.unit,
+      paddingValue: padding.value,
+      paddingUnit: padding.unit,
+      marginValue: margin.value,
+      marginUnit: margin.unit,
+      radiusValue: radius.value,
+      radiusUnit: radius.unit,
+      gapValue: gap.value,
+      gapUnit: gap.unit
+    };
+  };
+
+  const elementType = element.type || "div";
+  const isSelected = selectedElementId === element.id;
+  const hasTextProp = Object.prototype.hasOwnProperty.call(element.props || {}, "text");
+  const canInlineEdit = !previewMode
+    && !readOnly
+    && hasTextProp
+    && elementType !== "input"
+    && elementType !== "textarea";
+
+  useEffect(() => {
+    setInlineHtml(currentElementHtml);
+    setIsEditingInline(false);
+  }, [element.id, currentElementHtml]);
+
+  useEffect(() => {
+    if (!isEditingInline) {
+      setInlineHtml(currentElementHtml);
+    }
+  }, [currentElementHtml, isEditingInline]);
+
+  useEffect(() => {
+    if (!isEditingInline || !inlineEditorRef.current) return;
+    inlineEditorRef.current.innerHTML = inlineHtml;
+    inlineEditorRef.current.focus();
+    const range = document.createRange();
+    range.selectNodeContents(inlineEditorRef.current);
+    range.collapse(false);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    try {
+      savedRangeRef.current = range.cloneRange();
+    } catch {
+      savedRangeRef.current = null;
+    }
+  }, [isEditingInline, inlineHtml]);
+
+  useEffect(() => {
+    if (!isSelected) {
+      setQuickStyleMenu((prev) => (prev.open ? { ...prev, open: false } : prev));
+    }
+  }, [isSelected]);
+
+  useEffect(() => {
+    if (!quickStyleMenu.open) return;
+
+    const isEventInsideMenu = (event) => {
+      const menuNode = quickMenuRef.current;
+      if (!menuNode) return false;
+      if (typeof event.composedPath === "function") {
+        return event.composedPath().includes(menuNode);
+      }
+      return menuNode.contains(event.target);
+    };
+
+    const handleGlobalClick = (event) => {
+      if (isEventInsideMenu(event)) return;
+      setQuickStyleMenu((prev) => (prev.open ? { ...prev, open: false } : prev));
+    };
+
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setQuickStyleMenu((prev) => (prev.open ? { ...prev, open: false } : prev));
+      }
+    };
+
+    window.addEventListener("click", handleGlobalClick);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("click", handleGlobalClick);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [quickStyleMenu.open]);
+
+  const applyStylePatch = (patch = {}) => {
+    if (!patch || typeof patch !== "object") return;
+    if (viewportKey === "base") {
+      updateStyles(element.id, patch);
+    } else {
+      updateResponsiveStyles(element.id, viewportKey, patch);
+    }
+  };
+
+  const toUnitValue = (value, unit = "px") => {
+    if (value === undefined || value === null || value === "") return "";
+    const num = parseFloat(String(value));
+    if (!Number.isFinite(num)) return null;
+    return `${num}${unit || "px"}`;
+  };
+
+  const updateQuickDraftField = (field, value, patchFactory = null) => {
+    setQuickDraft((prev) => {
+      const next = { ...prev, [field]: value };
+      if (typeof patchFactory === "function") {
+        const patch = patchFactory(next);
+        if (patch) applyStylePatch(patch);
+      }
+      return next;
+    });
+  };
+
+  const closeQuickStyleMenu = () => {
+    setQuickStyleMenu((prev) => (prev.open ? { ...prev, open: false } : prev));
+  };
 
   const handleClick = (e) => {
-    if (previewMode) return;
+    if (previewMode || readOnly) return;
+    if (isEditingInline) return;
     if (e.target.closest(".canvas-item") !== e.currentTarget) return;
     if (element.type === "link" || element.type === "a") {
       e.preventDefault();
@@ -251,8 +523,35 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
     onSelect(element.id);
   };
 
+  const handleContextMenu = (e) => {
+    if (previewMode || readOnly || isEditingInline) return;
+    e.preventDefault();
+    e.stopPropagation();
+    onSelect(element.id);
+    setShowMenu(false);
+
+    const activeResponsiveStyles = element.responsiveStyles?.[viewportKey] || {};
+    const activeRawStyles = viewportKey === "base"
+      ? (element.styles || {})
+      : { ...(element.styles || {}), ...activeResponsiveStyles };
+    const normalized = normalizePositionStyles(
+      activeRawStyles,
+      shouldKeepManualPosition(element)
+    );
+    setQuickDraft(makeQuickDraftFromStyles(normalized));
+
+    const estimatedWidth = 320;
+    const estimatedHeight = 410;
+    const maxX = Math.max(12, window.innerWidth - estimatedWidth - 12);
+    const maxY = Math.max(12, window.innerHeight - estimatedHeight - 12);
+    const nextX = Math.min(Math.max(12, e.clientX), maxX);
+    const nextY = Math.min(Math.max(12, e.clientY), maxY);
+    setQuickStyleMenu({ open: true, x: nextX, y: nextY });
+  };
+
   const handleMouseDown = (e) => {
-    if (previewMode) return;
+    if (previewMode || readOnly) return;
+    if (isEditingInline) return;
     if (e.button !== 0) return;
     if (e.target.closest(".canvas-item") !== e.currentTarget) return;
     if (e.target?.closest?.(".element-attach")) return;
@@ -260,6 +559,7 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
     e.preventDefault();
     e.stopPropagation();
 
+    closeQuickStyleMenu();
     onSelect(element.id);
 
     const node = itemRef.current;
@@ -339,15 +639,15 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
     window.addEventListener("mouseup", onUp);
   };
 
-  const handleResizeDown = (e) => {
-    if (previewMode) return;
+  const handleResizeDown = (axis = "both") => (e) => {
+    if (previewMode || readOnly) return;
+    if (isEditingInline) return;
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
 
     const node = itemRef.current;
     if (!node) return;
-    const keepManualPosition = shouldKeepManualPosition(element);
 
     const rect = node.getBoundingClientRect();
 
@@ -365,40 +665,41 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
       const dx = moveEvent.clientX - resizeRef.current.startX;
       const dy = moveEvent.clientY - resizeRef.current.startY;
 
-      const nextWidth = Math.max(20, resizeRef.current.startWidth + dx);
-      const nextHeight = Math.max(20, resizeRef.current.startHeight + dy);
+      const widthDelta = axis === "y" ? 0 : dx;
+      const heightDelta = axis === "x" ? 0 : dy;
 
-      const parentRect = node.offsetParent?.getBoundingClientRect();
-      const isSmallScreen = window.innerWidth < 768;
+      const nextWidth = Math.max(20, resizeRef.current.startWidth + widthDelta);
+      const nextHeight = Math.max(20, resizeRef.current.startHeight + heightDelta);
 
-      if (keepManualPosition && parentRect && parentRect.width > 0 && parentRect.height > 0 && !isSmallScreen) {
-        const widthPct = Math.max(1, Math.round((nextWidth / parentRect.width) * 100));
-        const heightPct = Math.max(1, Math.round((nextHeight / parentRect.height) * 100));
-        const nextStyles = {
-          width: `${widthPct}%`,
-          height: `${heightPct}%`
-        };
-        if (viewportKey === "base") {
-          updateStyles(element.id, nextStyles);
-        } else {
-          updateResponsiveStyles(element.id, viewportKey, nextStyles);
+      const parentNode = node.offsetParent || node.parentElement;
+      const parentRect = parentNode?.getBoundingClientRect();
+
+      if (parentRect && parentRect.width > 0 && parentRect.height > 0) {
+        const widthPct = Math.max(1, Number(((nextWidth / parentRect.width) * 100).toFixed(2)));
+        const heightPct = Math.max(1, Number(((nextHeight / parentRect.height) * 100).toFixed(2)));
+        const nextStyles = {};
+
+        if (axis !== "y") {
+          nextStyles.width = `${widthPct}%`;
         }
-      } else {
-        const nextStyles = {
-          width: `${Math.round(nextWidth)}px`,
-          height: `${Math.round(nextHeight)}px`
-        };
-        if (viewportKey === "base") {
-          updateStyles(element.id, nextStyles);
-        } else {
-          updateResponsiveStyles(element.id, viewportKey, nextStyles);
+        if (axis !== "x") {
+          nextStyles.height = `${heightPct}%`;
+          nextStyles.minHeight = `${Math.round(nextHeight)}px`;
+        }
+
+        if (Object.keys(nextStyles).length) {
+          if (viewportKey === "base") {
+            updateStyles(element.id, nextStyles);
+          } else {
+            updateResponsiveStyles(element.id, viewportKey, nextStyles);
+          }
         }
       }
 
-      if (!element.parentId && node?.offsetParent && autoExpandBody) {
-        const parentRect = node.offsetParent.getBoundingClientRect();
+      if (axis !== "x" && !element.parentId && node?.offsetParent && autoExpandBody) {
+        const parentRectNow = node.offsetParent.getBoundingClientRect();
         const nodeRect = node.getBoundingClientRect();
-        const bottom = nodeRect.bottom - parentRect.top;
+        const bottom = nodeRect.bottom - parentRectNow.top;
         const scrollHeight = node.offsetParent.scrollHeight || 0;
         const needed = Math.ceil(Math.max(bottom, scrollHeight) + 40);
         const nextBody = {};
@@ -438,12 +739,14 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
   };
 
   const handleToggleLock = (e) => {
+    if (readOnly) return;
     e.preventDefault();
     e.stopPropagation();
     setElementLock(element.id, !element.lockedToParent);
   };
 
   const handleDetach = (e) => {
+    if (readOnly) return;
     e.preventDefault();
     e.stopPropagation();
     setElementParent(element.id, null);
@@ -452,11 +755,191 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
   };
 
   const handleAttachTo = (targetId) => (e) => {
+    if (readOnly) return;
     e.preventDefault();
     e.stopPropagation();
     setElementParent(element.id, targetId);
     setElementLock(element.id, true);
     setShowMenu(false);
+  };
+
+  const startInlineEdit = (e) => {
+    if (!canInlineEdit) return;
+    e.preventDefault();
+    e.stopPropagation();
+    onSelect(element.id);
+    setShowMenu(false);
+    closeQuickStyleMenu();
+    setInlineHtml(currentElementHtml);
+    setIsEditingInline(true);
+  };
+
+  const getSelectionRangeInEditor = () => {
+    const editor = inlineEditorRef.current;
+    if (!editor) return null;
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return null;
+    const range = selection.getRangeAt(0);
+    if (!editor.contains(range.commonAncestorContainer)) return null;
+    return range;
+  };
+
+  const saveEditorSelection = () => {
+    const range = getSelectionRangeInEditor();
+    if (!range) return;
+    try {
+      savedRangeRef.current = range.cloneRange();
+    } catch {
+      savedRangeRef.current = null;
+    }
+  };
+
+  const restoreEditorSelection = () => {
+    const editor = inlineEditorRef.current;
+    const saved = savedRangeRef.current;
+    if (!editor || !saved) return false;
+    const container = saved.commonAncestorContainer;
+    if (!editor.contains(container)) return false;
+    try {
+      editor.focus();
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(saved);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const execEditorCommand = (command, value = null) => {
+    const editor = inlineEditorRef.current;
+    if (!editor) return;
+    try {
+      if (!restoreEditorSelection()) editor.focus();
+      document.execCommand("styleWithCSS", false, true);
+      if (command === "hiliteColor") {
+        const ok = document.execCommand("hiliteColor", false, value);
+        if (!ok) document.execCommand("backColor", false, value);
+        saveEditorSelection();
+        return;
+      }
+      document.execCommand(command, false, value);
+      saveEditorSelection();
+    } catch {
+      // no-op
+    }
+  };
+
+  const applyInlineStyle = (stylePatch = {}) => {
+    const editor = inlineEditorRef.current;
+    restoreEditorSelection();
+    const range = getSelectionRangeInEditor();
+    if (!editor || !range) return;
+
+    const setStyle = (node) => {
+      Object.entries(stylePatch).forEach(([k, v]) => {
+        if (v === undefined || v === null || v === "") node.style[k] = "";
+        else node.style[k] = v;
+      });
+    };
+
+    if (range.collapsed) {
+      const anchor = window.getSelection()?.anchorNode;
+      const baseNode = anchor?.nodeType === Node.ELEMENT_NODE ? anchor : anchor?.parentElement;
+      const target = baseNode && editor.contains(baseNode) ? baseNode : editor;
+      if (target && target !== editor) setStyle(target);
+      saveEditorSelection();
+      return;
+    }
+
+    const span = document.createElement("span");
+    setStyle(span);
+    try {
+      range.surroundContents(span);
+    } catch {
+      const extracted = range.extractContents();
+      span.appendChild(extracted);
+      range.insertNode(span);
+    }
+    saveEditorSelection();
+  };
+
+  const applyInlineTag = (tagName) => {
+    setToolbarInlineTag(tagName);
+    const editor = inlineEditorRef.current;
+    restoreEditorSelection();
+    const range = getSelectionRangeInEditor();
+    if (!editor || !range || range.collapsed) return;
+    const node = document.createElement(tagName);
+    try {
+      range.surroundContents(node);
+    } catch {
+      const extracted = range.extractContents();
+      node.appendChild(extracted);
+      range.insertNode(node);
+    }
+    saveEditorSelection();
+  };
+
+  const applyFontFamily = (family) => {
+    setToolbarFontFamily(family);
+    if (!family || family === "inherit") return;
+    execEditorCommand("fontName", family);
+  };
+
+  const applyFontSize = (sizePx) => {
+    const safe = String(sizePx || "").replace(/[^\d.]/g, "");
+    setToolbarFontSize(safe || "16");
+    if (!safe) return;
+    applyInlineStyle({ fontSize: `${safe}px` });
+  };
+
+  const applyBlockType = (blockTag) => {
+    setToolbarBlock(blockTag);
+    execEditorCommand("formatBlock", `<${blockTag}>`);
+  };
+
+  const applyTextColor = (color) => {
+    setToolbarTextColor(color);
+    execEditorCommand("foreColor", color);
+  };
+
+  const applyBgColor = (color) => {
+    setToolbarBgColor(color);
+    if (!color || color === "transparent") {
+      applyInlineStyle({ backgroundColor: "transparent" });
+      return;
+    }
+    execEditorCommand("hiliteColor", color);
+  };
+
+  const createLinkFromSelection = () => {
+    const url = window.prompt("Enter URL", "https://");
+    if (!url) return;
+    execEditorCommand("createLink", url.trim());
+  };
+
+  const keepToolbarButtonMouseDown = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const commitInlineEdit = () => {
+    if (!canInlineEdit) return;
+    const editorHtml = inlineEditorRef.current?.innerHTML ?? inlineHtml;
+    const cleanedHtml = sanitizeRichHtml(editorHtml);
+    const plainText = richHtmlToPlainText(cleanedHtml);
+    const currentText = String(element.props?.text ?? "");
+    const currentHtml = sanitizeRichHtml(String(element.props?.html ?? textToRichHtml(currentText)));
+    if (plainText !== currentText || cleanedHtml !== currentHtml) {
+      updateProps(element.id, { text: plainText, html: cleanedHtml });
+    }
+    setIsEditingInline(false);
+  };
+
+  const cancelInlineEdit = () => {
+    setInlineHtml(currentElementHtml);
+    setIsEditingInline(false);
   };
 
   const children = elements
@@ -468,10 +951,10 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
         elements={elements}
         onSelect={onSelect}
         previewMode={previewMode}
+        readOnly={readOnly || Boolean(child.layoutReadOnly)}
       />
     ));
 
-  const elementType = element.type || "div";
   const responsiveStyles = element.responsiveStyles?.[viewportKey] || {};
   const rawMergedStyles = viewportKey === "base"
     ? (element.styles || {})
@@ -498,6 +981,15 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
       visual.gridTemplateColumns = "repeat(auto-fit, minmax(160px, 1fr))";
     }
     if (!visual.gap) visual.gap = "12px";
+  }
+
+  // For containers, apply explicit display (flex/grid/...) to the rendered element
+  // that actually contains children, not to the outer canvas wrapper.
+  if (isContainer && hasDisplayOverride && mergedStyles.display) {
+    visual.display = mergedStyles.display;
+    if (layout.display === mergedStyles.display) {
+      delete layout.display;
+    }
   }
 
   if (!SIZE_ON_CONTENT.has(elementType)) {
@@ -536,7 +1028,7 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
 
   const wrapperStyle = {
     ...layout,
-    cursor: "move",
+    cursor: readOnly ? "default" : (isEditingInline ? "text" : "move"),
     animationName: animation.name && animation.name !== "none" ? animation.name : undefined,
     animationDuration: animation.duration,
     animationTimingFunction: animation.timing,
@@ -552,6 +1044,23 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
     attrs.className = attrs.class;
     delete attrs.class;
   }
+  if ((elementType === "a" || elementType === "link") && attrs.className) {
+    const cleaned = stripClassToken(attrs.className, "link-primary");
+    if (cleaned) attrs.className = cleaned;
+    else delete attrs.className;
+  }
+
+  // Hide helper borders in preview/export-like view; keep them only in edit mode.
+  if (previewMode && isHelperDashedBorder(visual.border)) {
+    delete visual.border;
+  }
+  const textVisual = hasTextProp && !visual.whiteSpace
+    ? { ...visual, whiteSpace: "pre-wrap" }
+    : visual;
+  const richHtml = typeof element.props?.html === "string"
+    ? sanitizeRichHtml(element.props.html)
+    : "";
+  const hasRichHtml = Boolean(richHtml && richHtml.trim());
 
   const pseudo = element.pseudoStyles || {};
   const isMedia = SIZE_ON_CONTENT.has(elementType);
@@ -565,20 +1074,33 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
     .element-${element.id}:focus{${focusCss}}
   `;
 
-  const containerOptions = elements.filter(el =>
+  const byIdForConnectivity = new Map(elements.map((item) => [item.id, item]));
+  const parentElement = byIdForConnectivity.get(element.parentId);
+  const parentType = parentElement?.type || "";
+  const containerOptions = elements.filter((el) =>
     CONTAINER_TYPES.has(el.type) &&
+    isConnectedToRoot(byIdForConnectivity, el.id) &&
+    !el.layoutReadOnly &&
     el.id !== element.id &&
     !isDescendant(elements, element.id, el.id)
   );
 
   const renderContent = () => {
     if (element.type === "text") {
-      return <p style={visual} {...attrs}>{element.props.text}</p>;
+      if (hasRichHtml) {
+        return <p style={textVisual} {...attrs} dangerouslySetInnerHTML={{ __html: richHtml }} />;
+      }
+      return <p style={textVisual} {...attrs}>{element.props.text}</p>;
     }
 
     if (element.type === "button") {
+      if (hasRichHtml) {
+        return (
+          <button style={textVisual} {...attrs} dangerouslySetInnerHTML={{ __html: richHtml }} />
+        );
+      }
       return (
-        <button style={visual} {...attrs}>
+        <button style={textVisual} {...attrs}>
           {element.props.text}
         </button>
       );
@@ -597,19 +1119,26 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
 
     if (element.type === "link" || element.type === "a") {
       const className = attrs.className || "";
-      if (!visual.textDecoration && className.includes("link-primary")) {
+      if (!visual.textDecoration && className.includes("text-decoration-none")) {
         visual.textDecoration = "none";
+      }
+      const normalizedColor = String(visual.color || "").trim().toLowerCase();
+      if (
+        parentType === "nav" &&
+        (!visual.color || normalizedColor === "#2563eb" || normalizedColor === "#0f172a")
+      ) {
+        visual.color = "inherit";
       }
       return (
         <a
           href={element.props.href}
           target={element.props.target}
           rel="noreferrer"
-          style={visual}
+          style={textVisual}
           {...attrs}
           onClick={handleLinkClick}
         >
-          {element.props.text}
+          {hasRichHtml ? <span dangerouslySetInnerHTML={{ __html: richHtml }} /> : element.props.text}
           {children}
         </a>
       );
@@ -627,7 +1156,9 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
     }
 
     const tag = elementType;
-    const props = { ...element.props, ...attrs, style: visual };
+    const props = { ...element.props, ...attrs, style: hasTextProp ? textVisual : visual };
+    if ("text" in props) delete props.text;
+    if ("html" in props) delete props.html;
 
     if (VOID_TAGS.has(tag)) {
       return React.createElement(tag, props);
@@ -641,21 +1172,34 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
       return React.createElement(tag, nextProps);
     }
 
+    if (hasRichHtml) {
+      const richChild = React.createElement("span", {
+        key: `rich-${element.id}`,
+        dangerouslySetInnerHTML: { __html: richHtml }
+      });
+      return React.createElement(tag, props, [richChild, ...children]);
+    }
+
     const content = element.props?.text ?? tag;
     return React.createElement(tag, props, [content, ...children]);
   };
 
   return (
     <div
-      className={`${className}${isContainer ? " container-frame" : ""}${isHighlighted ? " container-highlight" : ""}`}
+      className={`${className}${isContainer && !previewMode && !readOnly ? " container-frame" : ""}${isHighlighted ? " container-highlight" : ""}${readOnly ? " is-layout-readonly" : ""}${isEditingInline ? " is-inline-editing" : ""}${isSelected ? " is-selected" : ""}`}
       ref={itemRef}
       style={wrapperStyle}
       onMouseDown={handleMouseDown}
       onClick={handleClick}
+      onContextMenu={handleContextMenu}
+      onFocus={() => {
+        if (!previewMode && !readOnly) onSelect(element.id);
+      }}
+      onDoubleClick={startInlineEdit}
       tabIndex={0}
     >
       <style>{styleTag}</style>
-      {!previewMode && (
+      {!previewMode && !readOnly && !isEditingInline && (
         <div className="element-attach">
           <button
             type="button"
@@ -699,8 +1243,499 @@ export default function CanvasItem({ element, elements, onSelect, previewMode = 
           )}
         </div>
       )}
+      {!previewMode && !readOnly && !isEditingInline && isSelected && quickStyleMenu.open && (
+        <div
+          ref={quickMenuRef}
+          className="quick-style-menu"
+          style={{ left: quickStyleMenu.x, top: quickStyleMenu.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <div className="quick-style-menu__header">
+            <strong>Quick Styles</strong>
+            <button
+              type="button"
+              className="quick-style-menu__close"
+              onClick={closeQuickStyleMenu}
+              title="Close"
+            >
+              ×
+            </button>
+          </div>
+
+          <div className="quick-style-menu__section">
+            <label className="quick-style-menu__field quick-style-menu__field--color">
+              Text
+              <input
+                type="color"
+                value={quickDraft.textColor}
+                onChange={(e) =>
+                  updateQuickDraftField("textColor", e.target.value, (next) => ({ color: next.textColor }))
+                }
+              />
+            </label>
+            <label className="quick-style-menu__field quick-style-menu__field--color">
+              Background
+              <input
+                type="color"
+                value={quickDraft.bgColor}
+                onChange={(e) =>
+                  updateQuickDraftField("bgColor", e.target.value, (next) => ({ backgroundColor: next.bgColor }))
+                }
+              />
+            </label>
+          </div>
+
+          <div className="quick-style-menu__section">
+            <label className="quick-style-menu__field">
+              Font size
+              <div className="quick-style-menu__inline">
+                <input
+                  type="number"
+                  min={1}
+                  step={0.1}
+                  value={quickDraft.fontSizeValue}
+                  onChange={(e) =>
+                    updateQuickDraftField("fontSizeValue", e.target.value, (next) => {
+                      const nextValue = toUnitValue(next.fontSizeValue, next.fontSizeUnit);
+                      if (nextValue === null) return null;
+                      return { fontSize: nextValue };
+                    })
+                  }
+                />
+                <select
+                  value={quickDraft.fontSizeUnit}
+                  onChange={(e) =>
+                    updateQuickDraftField("fontSizeUnit", e.target.value, (next) => {
+                      const nextValue = toUnitValue(next.fontSizeValue, next.fontSizeUnit);
+                      if (nextValue === null) return null;
+                      return { fontSize: nextValue };
+                    })
+                  }
+                >
+                  <option value="px">px</option>
+                  <option value="rem">rem</option>
+                  <option value="em">em</option>
+                  <option value="%">%</option>
+                </select>
+              </div>
+            </label>
+
+            <label className="quick-style-menu__field">
+              Weight
+              <select
+                value={quickDraft.fontWeight}
+                onChange={(e) =>
+                  updateQuickDraftField("fontWeight", e.target.value, (next) => ({ fontWeight: next.fontWeight }))
+                }
+              >
+                <option value="normal">normal</option>
+                <option value="500">500</option>
+                <option value="600">600</option>
+                <option value="700">700</option>
+                <option value="bold">bold</option>
+              </select>
+            </label>
+          </div>
+
+          <div className="quick-style-menu__section">
+            <label className="quick-style-menu__field">
+              Align
+              <select
+                value={quickDraft.textAlign}
+                onChange={(e) =>
+                  updateQuickDraftField("textAlign", e.target.value, (next) => ({ textAlign: next.textAlign }))
+                }
+              >
+                <option value="left">left</option>
+                <option value="center">center</option>
+                <option value="right">right</option>
+                <option value="justify">justify</option>
+                <option value="start">start</option>
+                <option value="end">end</option>
+              </select>
+            </label>
+
+            <label className="quick-style-menu__field">
+              Display
+              <select
+                value={quickDraft.display}
+                onChange={(e) =>
+                  updateQuickDraftField("display", e.target.value, (next) => ({ display: next.display }))
+                }
+              >
+                <option value="">(default)</option>
+                <option value="block">block</option>
+                <option value="inline">inline</option>
+                <option value="inline-block">inline-block</option>
+                <option value="flex">flex</option>
+                <option value="grid">grid</option>
+              </select>
+            </label>
+          </div>
+
+          <div className="quick-style-menu__section quick-style-menu__section--triple">
+            <label className="quick-style-menu__field">
+              Padding
+              <div className="quick-style-menu__inline">
+                <input
+                  type="number"
+                  step={0.1}
+                  value={quickDraft.paddingValue}
+                  onChange={(e) =>
+                    updateQuickDraftField("paddingValue", e.target.value, (next) => {
+                      const nextValue = toUnitValue(next.paddingValue, next.paddingUnit);
+                      if (nextValue === null) return null;
+                      return { padding: nextValue };
+                    })
+                  }
+                />
+                <select
+                  value={quickDraft.paddingUnit}
+                  onChange={(e) =>
+                    updateQuickDraftField("paddingUnit", e.target.value, (next) => {
+                      const nextValue = toUnitValue(next.paddingValue, next.paddingUnit);
+                      if (nextValue === null) return null;
+                      return { padding: nextValue };
+                    })
+                  }
+                >
+                  <option value="px">px</option>
+                  <option value="rem">rem</option>
+                  <option value="em">em</option>
+                  <option value="%">%</option>
+                </select>
+              </div>
+            </label>
+
+            <label className="quick-style-menu__field">
+              Margin
+              <div className="quick-style-menu__inline">
+                <input
+                  type="number"
+                  step={0.1}
+                  value={quickDraft.marginValue}
+                  onChange={(e) =>
+                    updateQuickDraftField("marginValue", e.target.value, (next) => {
+                      const nextValue = toUnitValue(next.marginValue, next.marginUnit);
+                      if (nextValue === null) return null;
+                      return { margin: nextValue };
+                    })
+                  }
+                />
+                <select
+                  value={quickDraft.marginUnit}
+                  onChange={(e) =>
+                    updateQuickDraftField("marginUnit", e.target.value, (next) => {
+                      const nextValue = toUnitValue(next.marginValue, next.marginUnit);
+                      if (nextValue === null) return null;
+                      return { margin: nextValue };
+                    })
+                  }
+                >
+                  <option value="px">px</option>
+                  <option value="rem">rem</option>
+                  <option value="em">em</option>
+                  <option value="%">%</option>
+                </select>
+              </div>
+            </label>
+
+            <label className="quick-style-menu__field">
+              Radius
+              <div className="quick-style-menu__inline">
+                <input
+                  type="number"
+                  step={0.1}
+                  value={quickDraft.radiusValue}
+                  onChange={(e) =>
+                    updateQuickDraftField("radiusValue", e.target.value, (next) => {
+                      const nextValue = toUnitValue(next.radiusValue, next.radiusUnit);
+                      if (nextValue === null) return null;
+                      return { borderRadius: nextValue };
+                    })
+                  }
+                />
+                <select
+                  value={quickDraft.radiusUnit}
+                  onChange={(e) =>
+                    updateQuickDraftField("radiusUnit", e.target.value, (next) => {
+                      const nextValue = toUnitValue(next.radiusValue, next.radiusUnit);
+                      if (nextValue === null) return null;
+                      return { borderRadius: nextValue };
+                    })
+                  }
+                >
+                  <option value="px">px</option>
+                  <option value="rem">rem</option>
+                  <option value="%">%</option>
+                </select>
+              </div>
+            </label>
+          </div>
+
+          <div className="quick-style-menu__section">
+            <label className="quick-style-menu__field">
+              Gap
+              <div className="quick-style-menu__inline">
+                <input
+                  type="number"
+                  step={0.1}
+                  value={quickDraft.gapValue}
+                  onChange={(e) =>
+                    updateQuickDraftField("gapValue", e.target.value, (next) => {
+                      const nextValue = toUnitValue(next.gapValue, next.gapUnit);
+                      if (nextValue === null) return null;
+                      return { gap: nextValue };
+                    })
+                  }
+                />
+                <select
+                  value={quickDraft.gapUnit}
+                  onChange={(e) =>
+                    updateQuickDraftField("gapUnit", e.target.value, (next) => {
+                      const nextValue = toUnitValue(next.gapValue, next.gapUnit);
+                      if (nextValue === null) return null;
+                      return { gap: nextValue };
+                    })
+                  }
+                >
+                  <option value="px">px</option>
+                  <option value="rem">rem</option>
+                  <option value="em">em</option>
+                  <option value="%">%</option>
+                </select>
+              </div>
+            </label>
+          </div>
+
+          <div className="quick-style-menu__actions">
+            <button
+              type="button"
+              className="quick-style-menu__btn"
+              onClick={() => {
+                applyStylePatch({ color: "", backgroundColor: "" });
+                setQuickDraft((prev) => ({
+                  ...prev,
+                  textColor: "#111827",
+                  bgColor: "#ffffff"
+                }));
+              }}
+            >
+              Clear colors
+            </button>
+            <button
+              type="button"
+              className="quick-style-menu__btn"
+              onClick={() => {
+                applyStylePatch({ margin: "", padding: "", borderRadius: "", gap: "" });
+                setQuickDraft((prev) => ({
+                  ...prev,
+                  marginValue: "",
+                  paddingValue: "",
+                  radiusValue: "",
+                  gapValue: ""
+                }));
+              }}
+            >
+              Clear spacing
+            </button>
+          </div>
+        </div>
+      )}
       {renderContent()}
-      {!previewMode && <div className="resize-handle" onMouseDown={handleResizeDown} />}
+      {isEditingInline && (
+        <div
+          className="inline-rich-editor"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div
+            className="inline-rich-toolbar"
+            onMouseDown={(e) => {
+              e.stopPropagation();
+            }}
+          >
+            <div className="inline-rich-group">
+              <button type="button" className="inline-rich-btn" onMouseDown={keepToolbarButtonMouseDown} onClick={() => execEditorCommand("undo")} title="Undo">↶</button>
+              <button type="button" className="inline-rich-btn" onMouseDown={keepToolbarButtonMouseDown} onClick={() => execEditorCommand("redo")} title="Redo">↷</button>
+            </div>
+
+            <div className="inline-rich-group">
+              <button type="button" className="inline-rich-btn" onMouseDown={keepToolbarButtonMouseDown} onClick={() => execEditorCommand("bold")} title="Bold"><strong>B</strong></button>
+              <button type="button" className="inline-rich-btn" onMouseDown={keepToolbarButtonMouseDown} onClick={() => execEditorCommand("italic")} title="Italic"><em>I</em></button>
+              <button type="button" className="inline-rich-btn" onMouseDown={keepToolbarButtonMouseDown} onClick={() => execEditorCommand("underline")} title="Underline"><u>U</u></button>
+              <button type="button" className="inline-rich-btn" onMouseDown={keepToolbarButtonMouseDown} onClick={() => execEditorCommand("strikeThrough")} title="Strike">S</button>
+            </div>
+
+            <div className="inline-rich-group">
+              <select
+                className="inline-rich-select"
+                value={toolbarBlock}
+                onChange={(e) => applyBlockType(e.target.value)}
+              >
+                <option value="p">Paragraph</option>
+                <option value="div">Div</option>
+                <option value="h1">Heading 1</option>
+                <option value="h2">Heading 2</option>
+                <option value="h3">Heading 3</option>
+                <option value="h4">Heading 4</option>
+                <option value="h5">Heading 5</option>
+                <option value="h6">Heading 6</option>
+                <option value="blockquote">Quote</option>
+                <option value="pre">Pre</option>
+                <option value="address">Address</option>
+              </select>
+              <select
+                className="inline-rich-select"
+                value={toolbarFontFamily}
+                onChange={(e) => applyFontFamily(e.target.value)}
+              >
+                <option value="inherit">Default Font</option>
+                <option value="Arial, sans-serif">Arial</option>
+                <option value="'Segoe UI', sans-serif">Segoe UI</option>
+                <option value="'Trebuchet MS', sans-serif">Trebuchet</option>
+                <option value="'Verdana', sans-serif">Verdana</option>
+                <option value="'Tahoma', sans-serif">Tahoma</option>
+                <option value="'Times New Roman', serif">Times New Roman</option>
+                <option value="Georgia, serif">Georgia</option>
+                <option value="'Courier New', monospace">Courier New</option>
+                <option value="'Lucida Console', monospace">Lucida Console</option>
+              </select>
+              <input
+                className="inline-rich-size"
+                type="number"
+                min={8}
+                max={96}
+                value={toolbarFontSize}
+                onChange={(e) => setToolbarFontSize(e.target.value)}
+                onBlur={() => applyFontSize(toolbarFontSize)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") applyFontSize(toolbarFontSize);
+                }}
+                title="Font size (px)"
+              />
+              <select
+                className="inline-rich-select"
+                value={toolbarInlineTag}
+                onChange={(e) => applyInlineTag(e.target.value)}
+              >
+                <option value="span">Span</option>
+                <option value="small">Small</option>
+                <option value="strong">Strong</option>
+                <option value="em">Emphasis</option>
+                <option value="mark">Mark</option>
+                <option value="u">Underline Tag</option>
+                <option value="s">Strike Tag</option>
+                <option value="code">Code</option>
+                <option value="label">Label</option>
+              </select>
+            </div>
+
+            <div className="inline-rich-group">
+              <label className="inline-rich-label">
+                Text
+                <input
+                  type="color"
+                  value={toolbarTextColor}
+                  onChange={(e) => applyTextColor(e.target.value)}
+                />
+              </label>
+              <label className="inline-rich-label">
+                Bg
+                <input
+                  type="color"
+                  value={toolbarBgColor}
+                  onChange={(e) => applyBgColor(e.target.value)}
+                />
+              </label>
+              <button type="button" className="inline-rich-btn" onMouseDown={keepToolbarButtonMouseDown} onClick={() => applyBgColor("transparent")} title="Clear background">No Bg</button>
+            </div>
+
+            <div className="inline-rich-group">
+              <button type="button" className="inline-rich-btn" onMouseDown={keepToolbarButtonMouseDown} onClick={() => execEditorCommand("justifyLeft")} title="Align Left">L</button>
+              <button type="button" className="inline-rich-btn" onMouseDown={keepToolbarButtonMouseDown} onClick={() => execEditorCommand("justifyCenter")} title="Align Center">C</button>
+              <button type="button" className="inline-rich-btn" onMouseDown={keepToolbarButtonMouseDown} onClick={() => execEditorCommand("justifyRight")} title="Align Right">R</button>
+              <button type="button" className="inline-rich-btn" onMouseDown={keepToolbarButtonMouseDown} onClick={() => execEditorCommand("justifyFull")} title="Justify">J</button>
+            </div>
+
+            <div className="inline-rich-group">
+              <button type="button" className="inline-rich-btn" onMouseDown={keepToolbarButtonMouseDown} onClick={() => execEditorCommand("insertUnorderedList")} title="Bullets">• List</button>
+              <button type="button" className="inline-rich-btn" onMouseDown={keepToolbarButtonMouseDown} onClick={() => execEditorCommand("insertOrderedList")} title="Numbered">1. List</button>
+              <button type="button" className="inline-rich-btn" onMouseDown={keepToolbarButtonMouseDown} onClick={() => execEditorCommand("outdent")} title="Outdent">⟵</button>
+              <button type="button" className="inline-rich-btn" onMouseDown={keepToolbarButtonMouseDown} onClick={() => execEditorCommand("indent")} title="Indent">⟶</button>
+            </div>
+
+            <div className="inline-rich-group">
+              <button type="button" className="inline-rich-btn" onMouseDown={keepToolbarButtonMouseDown} onClick={createLinkFromSelection}>Link</button>
+              <button type="button" className="inline-rich-btn" onMouseDown={keepToolbarButtonMouseDown} onClick={() => execEditorCommand("unlink")}>Unlink</button>
+              <button type="button" className="inline-rich-btn" onMouseDown={keepToolbarButtonMouseDown} onClick={() => execEditorCommand("removeFormat")}>Clear</button>
+            </div>
+
+            <button type="button" className="inline-rich-btn is-save" onMouseDown={keepToolbarButtonMouseDown} onClick={commitInlineEdit}>
+              Save
+            </button>
+          </div>
+          <div
+            ref={inlineEditorRef}
+            className="inline-text-editor"
+            contentEditable
+            dir="auto"
+            suppressContentEditableWarning
+            onInput={saveEditorSelection}
+            onMouseUp={saveEditorSelection}
+            onKeyUp={saveEditorSelection}
+            onBlur={(e) => {
+              const nextTarget = e.relatedTarget;
+              if (nextTarget && e.currentTarget.parentElement?.contains(nextTarget)) return;
+              commitInlineEdit();
+            }}
+            onPaste={(e) => {
+              e.preventDefault();
+              const pasted = e.clipboardData?.getData("text/plain") || "";
+              document.execCommand("insertText", false, pasted);
+              setTimeout(saveEditorSelection, 0);
+            }}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Escape") {
+                e.preventDefault();
+                cancelInlineEdit();
+              }
+              if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                e.preventDefault();
+                commitInlineEdit();
+              }
+              if (e.key === "Enter" && !e.ctrlKey && !e.metaKey) {
+                e.preventDefault();
+                document.execCommand("insertLineBreak");
+                setTimeout(saveEditorSelection, 0);
+              }
+            }}
+          />
+        </div>
+      )}
+      {!previewMode && !readOnly && !isEditingInline && isSelected && (
+        <>
+          <div
+            className="resize-handle resize-handle-both"
+            onMouseDown={handleResizeDown("both")}
+            title="Resize width & height"
+          />
+          <div
+            className="resize-handle resize-handle-x"
+            onMouseDown={handleResizeDown("x")}
+            title="Resize width"
+          />
+          <div
+            className="resize-handle resize-handle-y"
+            onMouseDown={handleResizeDown("y")}
+            title="Resize height"
+          />
+        </>
+      )}
+      {!previewMode && readOnly && <span className="layout-badge">Layout</span>}
     </div>
   );
 }

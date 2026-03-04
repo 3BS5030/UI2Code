@@ -1,5 +1,6 @@
 ﻿import React, { useMemo, useState, useEffect } from "react";
 import { useBuilderStore } from "../../store/builderStore";
+import { shouldKeepManualPosition } from "../../utils/styleParser";
 
 const STYLE_PRESETS = [
     "width",
@@ -231,6 +232,31 @@ const buildBackgroundImageValue = (value) => {
     return safe ? `url("${safe}")` : "";
 };
 
+const FLOW_POSITION_TO_MARGIN = {
+    left: "marginLeft",
+    top: "marginTop",
+    right: "marginRight",
+    bottom: "marginBottom"
+};
+
+const toKebab = (value = "") =>
+    String(value).replace(/[A-Z]/g, (match) => `-${match.toLowerCase()}`);
+
+const styleObjectToCssBody = (styles = {}) =>
+    Object.entries(styles)
+        .filter(([, val]) => val !== undefined && val !== null && val !== "")
+        .map(([key, val]) => `  ${toKebab(key)}: ${val};`)
+        .join("\n");
+
+const normalizeClassNameInput = (value = "") => {
+    const raw = String(value || "").trim().replace(/^\./, "");
+    if (!raw) return "";
+    const cleaned = raw.replace(/[^a-zA-Z0-9_-]/g, "-");
+    if (!cleaned) return "";
+    if (/^\d/.test(cleaned)) return `c-${cleaned}`;
+    return cleaned;
+};
+
 export default function PropertiesPanel() {
 
     const pages = useBuilderStore(state => state.pages);
@@ -246,7 +272,10 @@ export default function PropertiesPanel() {
     const setPseudoStyles = useBuilderStore(state => state.setPseudoStyles);
     const updateAnimation = useBuilderStore(state => state.updateAnimation);
     const setAttributes = useBuilderStore(state => state.setAttributes);
+    const setElementLayout = useBuilderStore(state => state.setElementLayout);
     const deleteElement = useBuilderStore(state => state.deleteElement);
+    const saveSelectedAsComponent = useBuilderStore(state => state.saveSelectedAsComponent);
+    const setCustomCss = useBuilderStore(state => state.setCustomCss);
 
     const updateBodyStyles = useBuilderStore(state => state.updateBodyStyles);
     const setBodyStyles = useBuilderStore(state => state.setBodyStyles);
@@ -257,6 +286,7 @@ export default function PropertiesPanel() {
 
     const currentPage = pages.find(p => p.id === currentPageId);
     const elements = currentPage?.elements || [];
+    const customCss = currentPage?.customCss || "";
     const bodyStyles = currentPage?.bodyStyles || {};
     const bodyResponsive = currentPage?.bodyResponsive || {};
     const bodyAttrs = currentPage?.bodyAttrs || {};
@@ -272,6 +302,8 @@ export default function PropertiesPanel() {
     const [newAttrValue, setNewAttrValue] = useState("");
     const [styleKey, setStyleKey] = useState("");
     const [styleValue, setStyleValue] = useState("");
+    const [componentName, setComponentName] = useState("");
+    const [componentNotice, setComponentNotice] = useState(null);
 
     useEffect(() => {
         if (selectedElement) {
@@ -286,6 +318,22 @@ export default function PropertiesPanel() {
             setStyleTarget("base");
         }
     }, [mode]);
+
+    useEffect(() => {
+        if (!selectedId) {
+            setComponentName("");
+            return;
+        }
+        const typeName = selectedElement?.type || "Component";
+        setComponentName(`${typeName} Component`);
+        setComponentNotice(null);
+    }, [selectedId, selectedElement]);
+
+    useEffect(() => {
+        if (!componentNotice) return undefined;
+        const timeout = setTimeout(() => setComponentNotice(null), 2400);
+        return () => clearTimeout(timeout);
+    }, [componentNotice]);
 
     const isBody = mode === "body";
     const responsiveOverrides = isBody
@@ -303,6 +351,19 @@ export default function PropertiesPanel() {
             : (pseudoStyles[styleTarget] || {}));
     const currentAttrs = isBody ? (bodyAttrs || {}) : (selectedElement?.attrs || {});
     const animation = selectedElement?.animation || {};
+    const isFlowPositionMode = !isBody
+        && styleTarget === "base"
+        && !!selectedElement
+        && !shouldKeepManualPosition(selectedElement);
+
+    const buildStylePatch = (key, value) => {
+        const patch = { [key]: value };
+        const mappedKey = FLOW_POSITION_TO_MARGIN[key];
+        if (isFlowPositionMode && mappedKey) {
+            patch[mappedKey] = value;
+        }
+        return patch;
+    };
 
     const handleTextChange = (e) => {
         const value = e.target.value;
@@ -356,23 +417,84 @@ export default function PropertiesPanel() {
         setNewAttrValue("");
     };
 
+    const handleSaveAsComponent = () => {
+        if (!selectedElement) return;
+        const name = (componentName || "").trim() || `${selectedElement.type || "Component"} Component`;
+        const result = saveSelectedAsComponent(selectedElement.id, name);
+        if (result?.ok) {
+            setComponentNotice({ type: "success", text: `Saved "${result.component.name}" to Toolbox.` });
+            return;
+        }
+        setComponentNotice({ type: "danger", text: result?.message || "Failed to save component." });
+    };
+
+    const handleSaveStyleInClass = () => {
+        if (!selectedElement || isBody) return;
+
+        if (!currentStyles || Object.keys(currentStyles).length === 0) {
+            setComponentNotice({ type: "warning", text: "No styles in current target to save as class." });
+            return;
+        }
+
+        const suggested = `${selectedElement.type || "component"}-${selectedElement.id}`;
+        const userInput = window.prompt("Class name", suggested);
+        if (userInput === null) return;
+
+        const className = normalizeClassNameInput(userInput);
+        if (!className) {
+            setComponentNotice({ type: "danger", text: "Invalid class name." });
+            return;
+        }
+
+        const cssBody = styleObjectToCssBody(currentStyles);
+        if (!cssBody) {
+            setComponentNotice({ type: "warning", text: "Nothing to save." });
+            return;
+        }
+
+        const pseudoSuffix = styleTarget === "base" ? "" : `:${styleTarget}`;
+        const selector = `.${className}${pseudoSuffix}`;
+        const cssRule = `${selector} {\n${cssBody}\n}`;
+        const nextCss = customCss?.trim()
+            ? `${customCss.trim()}\n\n${cssRule}`
+            : cssRule;
+        setCustomCss(nextCss);
+
+        const existingClasses = String(currentAttrs.className || "")
+            .split(/\s+/)
+            .map((item) => item.trim())
+            .filter(Boolean);
+        if (!existingClasses.includes(className)) {
+            const merged = [...existingClasses, className].join(" ");
+            setAttributes(selectedId, { ...currentAttrs, className: merged });
+        }
+
+        setComponentNotice({ type: "success", text: `Saved ${selector} to CSS editor and linked it to element.` });
+    };
+
+    const handleLayoutToggle = (nextValue) => {
+        if (!selectedElement) return;
+        setElementLayout(selectedElement.id, nextValue);
+    };
+
     const handleStyleAdd = () => {
         if (!styleKey) return;
+        const patch = buildStylePatch(styleKey, styleValue);
 
         if (isBody) {
             if (viewportKey === "base") {
-                updateBodyStyles({ [styleKey]: styleValue });
+                updateBodyStyles(patch);
             } else {
-                updateBodyResponsiveStyles(viewportKey, { [styleKey]: styleValue });
+                updateBodyResponsiveStyles(viewportKey, patch);
             }
         } else if (styleTarget === "base") {
             if (viewportKey === "base") {
-                updateStyles(selectedId, { [styleKey]: styleValue });
+                updateStyles(selectedId, patch);
             } else {
-                updateResponsiveStyles(selectedId, viewportKey, { [styleKey]: styleValue });
+                updateResponsiveStyles(selectedId, viewportKey, patch);
             }
         } else {
-            updatePseudoStyles(selectedId, styleTarget, { [styleKey]: styleValue });
+            updatePseudoStyles(selectedId, styleTarget, patch);
         }
 
         setStyleKey("");
@@ -380,26 +502,31 @@ export default function PropertiesPanel() {
     };
 
     const handleStyleChange = (key, value) => {
+        const patch = buildStylePatch(key, value);
         if (isBody) {
             if (viewportKey === "base") {
-                updateBodyStyles({ [key]: value });
+                updateBodyStyles(patch);
             } else {
-                updateBodyResponsiveStyles(viewportKey, { [key]: value });
+                updateBodyResponsiveStyles(viewportKey, patch);
             }
         } else if (styleTarget === "base") {
             if (viewportKey === "base") {
-                updateStyles(selectedId, { [key]: value });
+                updateStyles(selectedId, patch);
             } else {
-                updateResponsiveStyles(selectedId, viewportKey, { [key]: value });
+                updateResponsiveStyles(selectedId, viewportKey, patch);
             }
         } else {
-            updatePseudoStyles(selectedId, styleTarget, { [key]: value });
+            updatePseudoStyles(selectedId, styleTarget, patch);
         }
     };
 
     const handleStyleRemove = (key) => {
         const next = { ...currentStyles };
         delete next[key];
+        const mappedKey = FLOW_POSITION_TO_MARGIN[key];
+        if (isFlowPositionMode && mappedKey) {
+            delete next[mappedKey];
+        }
 
         if (isBody) {
             if (viewportKey === "base") {
@@ -444,6 +571,7 @@ export default function PropertiesPanel() {
                     <input
                         type="number"
                         className="form-control form-control-sm"
+                        step="any"
                         value={num}
                         onChange={e => handleStyleChange(key, buildUnitValue(e.target.value, unit))}
                     />
@@ -525,6 +653,47 @@ export default function PropertiesPanel() {
                     >
                         Delete Element
                     </button>
+                    <div className="mt-2 d-flex gap-2">
+                        <input
+                            className="form-control form-control-sm"
+                            placeholder="Component name"
+                            value={componentName}
+                            onChange={(e) => setComponentName(e.target.value)}
+                        />
+                        <button
+                            type="button"
+                            className="btn btn-sm btn-outline-success"
+                            onClick={handleSaveAsComponent}
+                        >
+                            Save as Component
+                        </button>
+                    </div>
+                    <div className="mt-2">
+                        <button
+                            type="button"
+                            className="btn btn-sm btn-outline-primary"
+                            onClick={handleSaveStyleInClass}
+                        >
+                            Save Style in Class
+                        </button>
+                    </div>
+                    {componentNotice && (
+                        <div className={`alert alert-${componentNotice.type} py-2 mt-2 mb-0`}>
+                            {componentNotice.text}
+                        </div>
+                    )}
+                    <div className="form-check mt-2 mb-0">
+                        <input
+                            id="layout-element-toggle"
+                            type="checkbox"
+                            className="form-check-input"
+                            checked={Boolean(selectedElement.isLayout)}
+                            onChange={(e) => handleLayoutToggle(e.target.checked)}
+                        />
+                        <label className="form-check-label" htmlFor="layout-element-toggle">
+                            Keep this element as layout for child routes
+                        </label>
+                    </div>
                 </div>
             )}
 
@@ -676,9 +845,9 @@ export default function PropertiesPanel() {
                 <p className="text-muted small">No custom styles yet.</p>
             )}
             {Object.keys(currentStyles).map(key => (
-                <div className="d-flex gap-2 mb-2" key={key}>
+                <div className="style-row d-flex gap-2 mb-2" key={key}>
                     <input
-                        className="form-control form-control-sm"
+                        className="form-control form-control-sm prop-style-key"
                         value={key}
                         readOnly
                     />
@@ -686,13 +855,43 @@ export default function PropertiesPanel() {
                     {COLOR_KEYS.has(key) ? (
                         <input
                             type="color"
-                            className="form-control form-control-sm"
+                            className="form-control form-control-sm prop-style-value"
                             value={String(currentStyles[key] || "#000000")}
                             onChange={e => handleStyleChange(key, e.target.value)}
                         />
+                    ) : NUMBER_UNIT_KEYS.has(key) ? (
+                        <div className="d-flex gap-2 prop-style-number-wrap">
+                            <input
+                                type="number"
+                                className="form-control form-control-sm prop-style-number-input"
+                                step="any"
+                                value={parseUnitValue(currentStyles[key]).num}
+                                onChange={e => handleStyleChange(
+                                    key,
+                                    buildUnitValue(e.target.value, parseUnitValue(currentStyles[key]).unit)
+                                )}
+                            />
+                            <select
+                                className="form-select form-select-sm prop-style-unit-select"
+                                value={parseUnitValue(currentStyles[key]).unit}
+                                onChange={e => handleStyleChange(
+                                    key,
+                                    buildUnitValue(parseUnitValue(currentStyles[key]).num, e.target.value)
+                                )}
+                            >
+                                {UNIT_OPTIONS.map(opt => (
+                                    <option key={opt} value={opt}>{opt}</option>
+                                ))}
+                                {!UNIT_OPTIONS.includes(parseUnitValue(currentStyles[key]).unit) && (
+                                    <option value={parseUnitValue(currentStyles[key]).unit}>
+                                        {parseUnitValue(currentStyles[key]).unit}
+                                    </option>
+                                )}
+                            </select>
+                        </div>
                     ) : KEYWORD_OPTIONS[key] ? (
                         <select
-                            className="form-select form-select-sm"
+                            className="form-select form-select-sm prop-style-value"
                             value={currentStyles[key]}
                             onChange={e => handleStyleChange(key, e.target.value)}
                         >
@@ -705,32 +904,8 @@ export default function PropertiesPanel() {
                                 </option>
                             )}
                         </select>
-                    ) : NUMBER_UNIT_KEYS.has(key) ? (
-                        <div className="d-flex gap-2 w-100">
-                            <input
-                                type="number"
-                                className="form-control form-control-sm"
-                                value={parseUnitValue(currentStyles[key]).num}
-                                onChange={e => handleStyleChange(
-                                    key,
-                                    buildUnitValue(e.target.value, parseUnitValue(currentStyles[key]).unit)
-                                )}
-                            />
-                            <select
-                                className="form-select form-select-sm"
-                                value={parseUnitValue(currentStyles[key]).unit}
-                                onChange={e => handleStyleChange(
-                                    key,
-                                    buildUnitValue(parseUnitValue(currentStyles[key]).num, e.target.value)
-                                )}
-                            >
-                                {UNIT_OPTIONS.map(opt => (
-                                    <option key={opt} value={opt}>{opt}</option>
-                                ))}
-                            </select>
-                        </div>
                     ) : key === "backgroundImage" ? (
-                        <div className="d-flex flex-column gap-1 w-100">
+                        <div className="d-flex flex-column gap-1 w-100 prop-style-value">
                             <input
                                 className="form-control form-control-sm"
                                 value={currentStyles[key]}
@@ -750,14 +925,14 @@ export default function PropertiesPanel() {
                         </div>
                     ) : (
                         <input
-                            className="form-control form-control-sm"
+                            className="form-control form-control-sm prop-style-value"
                             value={currentStyles[key]}
                             onChange={e => handleStyleChange(key, e.target.value)}
                         />
                     )}
 
                     <button
-                        className="btn btn-sm btn-outline-danger"
+                        className="btn btn-sm btn-outline-danger prop-style-remove"
                         type="button"
                         onClick={() => handleStyleRemove(key)}
                     >

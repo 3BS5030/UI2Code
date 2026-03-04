@@ -9,6 +9,7 @@ import {
   updatePseudoStyles,
   setPseudoStyles,
   updateAnimation,
+  updateLayout,
   setAttributes,
   updateParent,
   updateLock,
@@ -51,15 +52,131 @@ const loadSessionSnapshot = () => {
   }
 };
 
+const normalizeFileList = (list = [], fallbackPrefix = "file") => {
+  if (!Array.isArray(list)) return [];
+  return list.map((file, index) => ({
+    id: Number.isFinite(Number(file?.id)) ? Number(file.id) : randomId(),
+    name: typeof file?.name === "string" && file.name.trim() ? file.name : `${fallbackPrefix}-${index + 1}`,
+    content: typeof file?.content === "string" ? file.content : ""
+  }));
+};
+
+const normalizePages = (pages = []) => {
+  if (!Array.isArray(pages)) return [];
+  return pages
+    .filter((page) => page && typeof page === "object")
+    .map((page, index) => ({
+      id: Number.isFinite(Number(page?.id)) ? Number(page.id) : randomId(),
+      title: typeof page?.title === "string" && page.title.trim() ? page.title : `Page ${index + 1}`,
+      route: typeof page?.route === "string" && page.route.trim() ? page.route : (index === 0 ? "/" : `/page-${index + 1}`),
+      parentId: Number.isFinite(Number(page?.parentId)) ? Number(page.parentId) : null,
+      description: typeof page?.description === "string" ? page.description : "",
+      elements: Array.isArray(page?.elements) ? deepClone(page.elements) : [],
+      bodyStyles: page?.bodyStyles && typeof page.bodyStyles === "object" ? deepClone(page.bodyStyles) : {},
+      bodyResponsive: page?.bodyResponsive && typeof page.bodyResponsive === "object" ? deepClone(page.bodyResponsive) : {},
+      bodyAttrs: page?.bodyAttrs && typeof page.bodyAttrs === "object" ? deepClone(page.bodyAttrs) : {},
+      customCss: typeof page?.customCss === "string" ? page.customCss : "",
+      customJs: typeof page?.customJs === "string" ? page.customJs : "",
+      cssFiles: normalizeFileList(page?.cssFiles, "page-css"),
+      jsFiles: normalizeFileList(page?.jsFiles, "page-js")
+    }));
+};
+
+const buildSessionSnapshot = (state) => ({
+  pages: deepClone(state.pages || []),
+  customComponents: deepClone(state.customComponents || []),
+  currentPageId: state.currentPageId ?? null,
+  selectedElementId: state.selectedElementId ?? null,
+  viewportPreset: state.viewportPreset || "auto",
+  viewportKey: state.viewportKey || "base",
+  previewMode: Boolean(state.previewMode),
+  autoExpandBody: state.autoExpandBody !== false,
+  globalCssFiles: deepClone(state.globalCssFiles || []),
+  globalJsFiles: deepClone(state.globalJsFiles || []),
+  showCssEditor: Boolean(state.showCssEditor),
+  showJsEditor: Boolean(state.showJsEditor),
+  splitEditors: Boolean(state.splitEditors)
+});
+
 const createFile = (name = "new") => ({
   id: Math.floor(Math.random() * 99999999),
   name,
   content: ""
 });
 
+const randomId = () => Math.floor(Math.random() * 99999999);
+
+const deepClone = (value) => JSON.parse(JSON.stringify(value));
+
+const collectSubtree = (elements = [], rootId) => {
+  if (!rootId) return [];
+
+  const byId = new Map(elements.map(el => [el.id, el]));
+  if (!byId.has(rootId)) return [];
+
+  const byParent = new Map();
+  elements.forEach((el) => {
+    const key = el.parentId ?? "__root__";
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key).push(el);
+  });
+
+  const result = [];
+  const walk = (id) => {
+    const node = byId.get(id);
+    if (!node) return;
+    result.push(node);
+    const children = byParent.get(id) || [];
+    children.forEach(child => walk(child.id));
+  };
+
+  walk(rootId);
+  return result;
+};
+
+const buildClonedTemplateElements = (templateElements = [], targetParentId, existingElements = []) => {
+  if (!templateElements.length) return { elements: [], rootId: null };
+
+  const templateIds = new Set(templateElements.map(el => el.id));
+  const used = new Set(existingElements.map(el => el.id));
+  const idMap = new Map();
+
+  const nextId = () => {
+    let id = randomId();
+    while (used.has(id) || idMap.has(id)) id = randomId();
+    used.add(id);
+    return id;
+  };
+
+  templateElements.forEach((el) => {
+    idMap.set(el.id, nextId());
+  });
+
+  let firstRootId = null;
+  const cloned = templateElements.map((el) => {
+    const isRoot = !templateIds.has(el.parentId);
+    const parentId = isRoot
+      ? (targetParentId ?? null)
+      : (idMap.get(el.parentId) ?? null);
+
+    const next = {
+      ...deepClone(el),
+      id: idMap.get(el.id),
+      parentId,
+      lockedToParent: Boolean(parentId)
+    };
+
+    if (isRoot && firstRootId === null) firstRootId = next.id;
+    return next;
+  });
+
+  return { elements: cloned, rootId: firstRootId };
+};
+
 export const useBuilderStore = create((set, get) => ({
 
   pages: [createPage()],
+  customComponents: [],
   currentPageId: null,
   viewportPreset: "auto",
   viewportKey: "base",
@@ -86,23 +203,84 @@ export const useBuilderStore = create((set, get) => ({
 
     const snapshot = loadSessionSnapshot();
     if (snapshot) {
-      const currentId = snapshot.currentPageId || snapshot.pages[0]?.id || null;
-      set({
-        pages: snapshot.pages,
-        currentPageId: currentId,
-        viewportPreset: snapshot.viewportPreset || "auto",
-        viewportKey: snapshot.viewportKey || "base",
-        globalCssFiles: snapshot.globalCssFiles || [],
-        globalJsFiles: snapshot.globalJsFiles || [],
-        showCssEditor: Boolean(snapshot.showCssEditor),
-        showJsEditor: Boolean(snapshot.showJsEditor),
-        splitEditors: Boolean(snapshot.splitEditors)
-      });
-      return;
+      const result = get().restoreSessionFromSnapshot(snapshot);
+      if (result?.ok) return;
     }
 
     if (state.pages.length > 0) {
       set({ currentPageId: state.pages[0].id });
+    }
+  },
+
+  getSessionSnapshot: () => {
+    const state = get();
+    return buildSessionSnapshot(state);
+  },
+
+  restoreSessionFromSnapshot: (incomingSnapshot) => {
+    try {
+      const snapshot = typeof incomingSnapshot === "string"
+        ? JSON.parse(incomingSnapshot)
+        : incomingSnapshot;
+
+      const pages = normalizePages(snapshot?.pages);
+      if (!pages.length) {
+        return { ok: false, message: "Invalid session file: no pages found." };
+      }
+
+      const customComponents = Array.isArray(snapshot?.customComponents)
+        ? deepClone(snapshot.customComponents)
+        : [];
+      const globalCssFiles = normalizeFileList(snapshot?.globalCssFiles, "global-css");
+      const globalJsFiles = normalizeFileList(snapshot?.globalJsFiles, "global-js");
+
+      const currentPageId = pages.some((page) => page.id === snapshot?.currentPageId)
+        ? snapshot.currentPageId
+        : pages[0].id;
+
+      const pageById = new Map(pages.map((page) => [page.id, page]));
+      const selectedElementId =
+        Number.isFinite(Number(snapshot?.selectedElementId)) &&
+        (pageById.get(currentPageId)?.elements || []).some((el) => el.id === snapshot.selectedElementId)
+          ? snapshot.selectedElementId
+          : null;
+
+      const nextState = {
+        pages,
+        customComponents,
+        currentPageId,
+        selectedElementId,
+        viewportPreset: snapshot?.viewportPreset || "auto",
+        viewportKey: snapshot?.viewportKey || "base",
+        previewMode: Boolean(snapshot?.previewMode),
+        autoExpandBody: snapshot?.autoExpandBody !== false,
+        globalCssFiles,
+        globalJsFiles,
+        showCssEditor: Boolean(snapshot?.showCssEditor),
+        showJsEditor: Boolean(snapshot?.showJsEditor),
+        splitEditors: Boolean(snapshot?.splitEditors),
+        highlightContainerId: null,
+        hoverContainerId: null,
+        draggingElementId: null,
+        attachHoldElementId: null,
+        attachHoldContainerId: null
+      };
+
+      set(() => nextState);
+
+      if (typeof window !== "undefined") {
+        try {
+          const stored = buildSessionSnapshot({ ...get(), ...nextState });
+          sessionStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
+        } catch (err) {
+          console.error("Session persist error:", err);
+        }
+      }
+
+      return { ok: true };
+    } catch (err) {
+      console.error("Session import error:", err);
+      return { ok: false, message: "Invalid session file format." };
     }
   },
 
@@ -364,6 +542,74 @@ export const useBuilderStore = create((set, get) => ({
         };
       })
     }));
+
+    return newEl.id;
+  },
+
+  // Save selected element subtree as reusable component
+  saveSelectedAsComponent: (id, name = "") => {
+    const state = get();
+    const currentPage = state.pages.find(p => p.id === state.currentPageId);
+    const elements = currentPage?.elements || [];
+    const selected = elements.find(el => el.id === id);
+
+    if (!selected) {
+      return { ok: false, message: "No element selected." };
+    }
+
+    const subtree = collectSubtree(elements, id);
+    if (!subtree.length) {
+      return { ok: false, message: "Could not capture element tree." };
+    }
+
+    const label = String(name || `${selected.type} Component`).trim() || `${selected.type} Component`;
+    const existingIds = new Set(state.customComponents.map(c => c.id));
+    let componentId = randomId();
+    while (existingIds.has(componentId)) componentId = randomId();
+
+    const component = {
+      id: componentId,
+      name: label,
+      rootType: selected.type || "div",
+      elements: subtree.map(el => deepClone(el))
+    };
+
+    set((prev) => ({
+      customComponents: [...prev.customComponents, component]
+    }));
+
+    return { ok: true, component };
+  },
+
+  // Add saved reusable component to current page
+  addSavedComponent: (componentId, parentId = null) => {
+    const state = get();
+    const component = state.customComponents.find(c => c.id === componentId);
+    if (!component) {
+      return { ok: false, message: "Saved component not found." };
+    }
+
+    let insertedRootId = null;
+
+    set((prev) => ({
+      pages: prev.pages.map((p) => {
+        if (p.id !== prev.currentPageId) return p;
+        const clone = buildClonedTemplateElements(component.elements || [], parentId, p.elements || []);
+        if (!clone.elements.length) return p;
+        insertedRootId = clone.rootId;
+        return {
+          ...p,
+          elements: [...(p.elements || []), ...clone.elements]
+        };
+      }),
+      selectedElementId: insertedRootId || prev.selectedElementId
+    }));
+
+    if (!insertedRootId) {
+      return { ok: false, message: "Could not insert saved component." };
+    }
+
+    return { ok: true, rootId: insertedRootId };
   },
 
   // Update props (merge)
@@ -478,6 +724,19 @@ export const useBuilderStore = create((set, get) => ({
         return {
           ...p,
           elements: setAttributes(p.elements, id, attrs)
+        };
+      })
+    }));
+  },
+
+  // Toggle element as inherited layout source
+  setElementLayout: (id, isLayout) => {
+    set(state => ({
+      pages: state.pages.map(p => {
+        if (p.id !== state.currentPageId) return p;
+        return {
+          ...p,
+          elements: updateLayout(p.elements, id, isLayout)
         };
       })
     }));

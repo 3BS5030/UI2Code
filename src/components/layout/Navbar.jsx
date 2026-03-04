@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Container, Nav, Navbar, NavDropdown, Button, Modal, Form, Collapse, Table } from "react-bootstrap";
 import { useBuilderStore } from "../../store/builderStore";
 import { generatePageHtml } from "../../core/generator";
@@ -38,17 +38,11 @@ export default function AppNavbar() {
   const currentPageId = useBuilderStore(state => state.currentPageId);
   const addPage = useBuilderStore(state => state.addPage);
   const selectPage = useBuilderStore(state => state.selectPage);
-  const previewMode = useBuilderStore(state => state.previewMode);
-  const togglePreviewMode = useBuilderStore(state => state.togglePreviewMode);
-  const showCssEditor = useBuilderStore(state => state.showCssEditor);
-  const showJsEditor = useBuilderStore(state => state.showJsEditor);
-  const splitEditors = useBuilderStore(state => state.splitEditors);
-  const toggleShowCssEditor = useBuilderStore(state => state.toggleShowCssEditor);
-  const toggleShowJsEditor = useBuilderStore(state => state.toggleShowJsEditor);
-  const toggleSplitEditors = useBuilderStore(state => state.toggleSplitEditors);
   const globalCssFiles = useBuilderStore(state => state.globalCssFiles);
   const globalJsFiles = useBuilderStore(state => state.globalJsFiles);
   const viewportPreset = useBuilderStore(state => state.viewportPreset);
+  const getSessionSnapshot = useBuilderStore(state => state.getSessionSnapshot);
+  const restoreSessionFromSnapshot = useBuilderStore(state => state.restoreSessionFromSnapshot);
 
   const firstPage = pages[0] || { title: "Home", route: "/", description: "" };
   const currentPage = useMemo(
@@ -61,18 +55,27 @@ export default function AppNavbar() {
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [isExportingImage, setIsExportingImage] = useState(false);
   const [filesState, setFilesState] = useState([]);
+  const sessionFileInputRef = useRef(null);
   const [title, setTitle] = useState(firstPage.title || "Home");
   const [route, setRoute] = useState(firstPage.route || "/");
   const [description, setDescription] = useState(firstPage.description || "");
   const [parentId, setParentId] = useState("root");
 
-  const openModal = () => {
+  const openModal = useCallback(() => {
     setTitle(firstPage.title || "Home");
     setRoute(firstPage.route || "/");
     setDescription(firstPage.description || "");
     setParentId("root");
     setShowModal(true);
-  };
+  }, [firstPage]);
+
+  useEffect(() => {
+    const handleOpenAddPageModal = () => openModal();
+    window.addEventListener("ui2code:open-add-page-modal", handleOpenAddPageModal);
+    return () => {
+      window.removeEventListener("ui2code:open-add-page-modal", handleOpenAddPageModal);
+    };
+  }, [openModal]);
 
   const buildRoute = (baseRoute, childRoute) => {
     const cleanBase = (baseRoute || "/").replace(/\/$/, "");
@@ -99,7 +102,7 @@ export default function AppNavbar() {
     setShowModal(false);
   };
 
-  const code = useMemo(() => generatePageHtml(currentPage), [currentPage]);
+  const code = useMemo(() => generatePageHtml(currentPage, pages), [currentPage, pages]);
 
   const openProjectModal = () => {
     const files = buildReactProjectFiles(pages, globalCssFiles, globalJsFiles);
@@ -182,6 +185,7 @@ export default function AppNavbar() {
     try {
       const globalCssText = (globalCssFiles || []).map(f => f.content || "").join("\n");
       await exportPageImage(currentPage, {
+        pages,
         format,
         width: viewportWidth,
         pixelRatio: 2,
@@ -192,6 +196,61 @@ export default function AppNavbar() {
       alert("Image export failed. Check console for details.");
     } finally {
       setIsExportingImage(false);
+    }
+  };
+
+  const buildSessionFileName = () => {
+    const now = new Date();
+    const pad = (v) => String(v).padStart(2, "0");
+    const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    const time = `${pad(now.getHours())}-${pad(now.getMinutes())}`;
+    return `ui2code-session-${date}_${time}.json`;
+  };
+
+  const downloadSession = () => {
+    try {
+      const snapshot = getSessionSnapshot?.();
+      if (!snapshot || !Array.isArray(snapshot.pages) || snapshot.pages.length === 0) {
+        alert("No session data to save.");
+        return;
+      }
+
+      const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = buildSessionFileName();
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Session export error:", err);
+      alert("Failed to save session file.");
+    }
+  };
+
+  const openSessionPicker = () => {
+    sessionFileInputRef.current?.click();
+  };
+
+  const handleOpenSessionFile = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      const result = restoreSessionFromSnapshot?.(parsed);
+      if (!result?.ok) {
+        alert(result?.message || "Could not open session file.");
+        return;
+      }
+      alert("Session loaded successfully.");
+    } catch (err) {
+      console.error("Session import error:", err);
+      alert("Invalid session file.");
     }
   };
 
@@ -221,78 +280,69 @@ export default function AppNavbar() {
               </NavDropdown>
             </Nav>
 
-            <div className="d-flex gap-2 navbar-actions">
-              <Button
-                variant="outline-secondary"
-                size="sm"
-                onClick={() => setShowCode(v => !v)}
-                className="nav-btn nav-btn-code"
-              >
-                {showCode ? "Hide Code" : "Show Code"}
-              </Button>
-              <Button
-                variant="outline-secondary"
-                size="sm"
-                onClick={toggleShowCssEditor}
-                className="nav-btn nav-btn-css"
-              >
-                {showCssEditor ? "Hide CSS" : "Edit CSS"}
-              </Button>
-              <Button
-                variant="outline-secondary"
-                size="sm"
-                onClick={toggleShowJsEditor}
-                className="nav-btn nav-btn-js"
-              >
-                {showJsEditor ? "Hide JS" : "JS Actions"}
-              </Button>
-              <Button
-                variant="outline-secondary"
-                size="sm"
-                onClick={toggleSplitEditors}
-                className="nav-btn nav-btn-split"
-              >
-                {splitEditors ? "Inline Editors" : "Split Editors"}
-              </Button>
-              <Button
-                variant="outline-secondary"
-                size="sm"
-                onClick={togglePreviewMode}
-                className="nav-btn nav-btn-preview"
-              >
-                {previewMode ? "Exit Preview" : "Preview"}
-              </Button>
-              <Button
-                variant="outline-primary"
-                size="sm"
-                onClick={() => exportPageZip(currentPage)}
-                className="nav-btn nav-btn-savepage"
-              >
-                Save Page
-              </Button>
-              <NavDropdown
-                title={isExportingImage ? "Saving..." : "Save Image"}
-                id="save-image-dropdown"
-                className="nav-btn nav-btn-saveimg"
-              >
-                <NavDropdown.Item disabled={isExportingImage} onClick={() => handleExportImage("png")}>
-                  PNG
-                </NavDropdown.Item>
-                <NavDropdown.Item disabled={isExportingImage} onClick={() => handleExportImage("svg")}>
-                  SVG
-                </NavDropdown.Item>
-              </NavDropdown>
-              <Button
-                variant="outline-primary"
-                size="sm"
-                onClick={openProjectModal}
-                className="nav-btn nav-btn-saveproj"
-              >
-                Save Project
-              </Button>
-              <Button variant="primary" size="sm" onClick={openModal} className="nav-btn nav-btn-addpage">
-                Add Page
-              </Button>
+            <div className="navbar-actions">
+              <input
+                ref={sessionFileInputRef}
+                type="file"
+                accept="application/json,.json"
+                style={{ display: "none" }}
+                onChange={handleOpenSessionFile}
+              />
+              <div className="navbar-menu-strip">
+                <Button
+                  variant="link"
+                  size="sm"
+                  onClick={() => setShowCode(v => !v)}
+                  className={`nav-menu-btn${showCode ? " is-active" : ""}`}
+                >
+                  {showCode ? "Hide Code" : "Show Code"}
+                </Button>
+                <Button
+                  variant="link"
+                  size="sm"
+                  onClick={() => exportPageZip(currentPage, pages)}
+                  className="nav-menu-btn"
+                >
+                  Save Page
+                </Button>
+                <Button
+                  variant="link"
+                  size="sm"
+                  onClick={downloadSession}
+                  className="nav-menu-btn"
+                >
+                  Save Session
+                </Button>
+                <Button
+                  variant="link"
+                  size="sm"
+                  onClick={openSessionPicker}
+                  className="nav-menu-btn"
+                >
+                  Open Session
+                </Button>
+                <NavDropdown
+                  title={isExportingImage ? "Saving..." : "Save Image"}
+                  id="save-image-dropdown"
+                  className="nav-menu-dropdown"
+                >
+                  <NavDropdown.Item disabled={isExportingImage} onClick={() => handleExportImage("png")}>
+                    PNG
+                  </NavDropdown.Item>
+                  <NavDropdown.Item disabled={isExportingImage} onClick={() => handleExportImage("svg")}>
+                    SVG
+                  </NavDropdown.Item>
+                </NavDropdown>
+                <Button
+                  variant="link"
+                  size="sm"
+                  onClick={openProjectModal}
+                  className="nav-menu-btn"
+                >
+                  Save Project
+                </Button>
+              </div>
+
             </div>
           </Navbar.Collapse>
         </Container>

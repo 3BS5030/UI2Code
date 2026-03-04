@@ -25,17 +25,22 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = useBuilderStore.subscribe((state) => {
       try {
-        const snapshot = {
-          pages: state.pages,
-          currentPageId: state.currentPageId,
-          viewportPreset: state.viewportPreset,
-          viewportKey: state.viewportKey,
-          globalCssFiles: state.globalCssFiles,
-          globalJsFiles: state.globalJsFiles,
-          showCssEditor: state.showCssEditor,
-          showJsEditor: state.showJsEditor,
-          splitEditors: state.splitEditors
-        };
+        const snapshot = typeof state.getSessionSnapshot === "function"
+          ? state.getSessionSnapshot()
+          : {
+              pages: state.pages,
+              customComponents: state.customComponents,
+              currentPageId: state.currentPageId,
+              viewportPreset: state.viewportPreset,
+              viewportKey: state.viewportKey,
+              previewMode: state.previewMode,
+              autoExpandBody: state.autoExpandBody,
+              globalCssFiles: state.globalCssFiles,
+              globalJsFiles: state.globalJsFiles,
+              showCssEditor: state.showCssEditor,
+              showJsEditor: state.showJsEditor,
+              splitEditors: state.splitEditors
+            };
         sessionStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
       } catch (err) {
         console.error("Session save error:", err);
@@ -65,12 +70,13 @@ export default function App() {
           {previewMode && <Canvas previewMode />}
           {!previewMode && !splitEditors && (
             <div className="canvas-inline">
-              {(showCssEditor || showJsEditor) && (
-                <div className="canvas-inline__editors">
-                  <EditorsPanel />
-                </div>
-              )}
-              <Canvas />
+              <Canvas
+                belowToolbar={(showCssEditor || showJsEditor) ? (
+                  <div className="canvas-inline__editors">
+                    <EditorsPanel />
+                  </div>
+                ) : null}
+              />
             </div>
           )}
           {!previewMode && splitEditors && (

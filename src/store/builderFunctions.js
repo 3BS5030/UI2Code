@@ -25,8 +25,8 @@ export function addElement(initialProps, type, parentId = null) {
     paragraph: "mb-3",
     button: "btn btn-primary",
     image: "img-fluid",
-    link: "link-primary text-decoration-none",
-    a: "link-primary text-decoration-none",
+    link: "text-decoration-none",
+    a: "text-decoration-none",
     h1: "h1",
     h2: "h2",
     h3: "h3",
@@ -48,6 +48,7 @@ export function addElement(initialProps, type, parentId = null) {
     id: id,
     type: type,
     parentId: parentId,
+    isLayout: false,
     lockedToParent: Boolean(parentId),
     props: initialProps,
     styles: styles,
@@ -93,6 +94,17 @@ export function updateProps(elements, id, newProps) {
   });
 
   return updatedElements;
+}
+
+// ===== Update Layout Flag =====
+export function updateLayout(elements, id, isLayout) {
+  return elements.map((element) => {
+    if (element.id !== id) return element;
+    return {
+      ...element,
+      isLayout: Boolean(isLayout)
+    };
+  });
 }
 
 // ===== Update Responsive Styles =====
@@ -309,12 +321,27 @@ export function updateLock(elements, id, locked) {
 
 // ===== Delete Element =====
 export function deleteElement(elements, id) {
-
-  const updatedElements = elements.filter(element => {
-    return element.id !== id && element.parentId !== id;
+  const byParent = new Map();
+  elements.forEach((el) => {
+    const key = el.parentId ?? "__root__";
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key).push(el.id);
   });
 
-  return updatedElements;
+  const idsToRemove = new Set([id]);
+  const stack = [id];
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    const children = byParent.get(current) || [];
+    children.forEach((childId) => {
+      if (idsToRemove.has(childId)) return;
+      idsToRemove.add(childId);
+      stack.push(childId);
+    });
+  }
+
+  return elements.filter((element) => !idsToRemove.has(element.id));
 }
 
 // ===== Select Element =====

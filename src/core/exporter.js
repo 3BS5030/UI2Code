@@ -1,7 +1,8 @@
 import JSZip from "jszip";
-import { generatePageHtml, generatePageParts } from "./generator";
+import { buildSliderRuntimeScript, generatePageHtml, generatePageParts } from "./generator";
 import { RESPONSIVE_BREAKPOINTS } from "./viewports";
 import { normalizePositionStyles, shouldKeepManualPosition } from "../utils/styleParser";
+import { getEffectivePageElements } from "../utils/pageLayout";
 
 const sanitizeRouteToFile = (route, fallback) => {
   if (!route || route === "/") return fallback;
@@ -158,12 +159,14 @@ const buildBodyResponsiveCss = (page = {}) => {
   }).join("");
 };
 
-const buildPageImageMarkup = (page, globalCssText = "") => {
-  const { html, styleTag } = generatePageParts(page);
+const buildPageImageMarkup = (page, pages = [], globalCssText = "") => {
+  const sourcePages = Array.isArray(pages) && pages.length ? pages : [page];
+  const { html, styleTag } = generatePageParts(page, sourcePages);
   const pageCss = (page.cssFiles || []).map(f => f.content || "").join("\n");
   const customCss = page.customCss || "";
 
-  const hasAbsolute = (page.elements || []).some((el) => {
+  const effectiveElements = getEffectivePageElements(sourcePages, page);
+  const hasAbsolute = effectiveElements.some((el) => {
     const normalized = normalizePositionStyles(el.styles || {}, shouldKeepManualPosition(el));
     return normalized.position === "absolute";
   });
@@ -259,9 +262,9 @@ const renderSvgToPngBlob = (svgString, width, height, pixelRatio = 2) => new Pro
   image.src = toSvgDataUrl(svgString);
 });
 
-export const exportPageZip = async (page) => {
+export const exportPageZip = async (page, pages = []) => {
   const zip = new JSZip();
-  const html = generatePageHtml(page);
+  const html = generatePageHtml(page, pages);
   const fileName = sanitizeRouteToFile(page.route, "index.html");
   zip.file(fileName, html);
 
@@ -272,6 +275,7 @@ export const exportPageZip = async (page) => {
 export const exportPageImage = async (
   page,
   {
+    pages = [],
     format = "png",
     width = 1200,
     pixelRatio = 2,
@@ -282,7 +286,7 @@ export const exportPageImage = async (
 
   const safeFormat = String(format).toLowerCase() === "svg" ? "svg" : "png";
   const safeWidth = Math.max(1, Math.round(Number(width) || 1200));
-  const markup = buildPageImageMarkup(page, globalCssText);
+  const markup = buildPageImageMarkup(page, pages, globalCssText);
   const height = measureExportHeight(markup, safeWidth);
   const svgString = buildSvgFromMarkup(markup, safeWidth, height);
   const base = sanitizeRouteToFile(page.route, "page").replace(/\.html$/, "");
@@ -320,7 +324,9 @@ const buildReactProjectFiles = (pages, globalCssFiles = [], globalJsFiles = []) 
 
   pages.forEach((page, index) => {
     const safeName = `Page${index + 1}`;
-    const { html, styleTag } = generatePageParts(page);
+    const { html, styleTag } = generatePageParts(page, pages);
+    const effectiveElements = getEffectivePageElements(pages, page);
+    const sliderRuntimeJs = buildSliderRuntimeScript(effectiveElements);
     const customJs = page.customJs || "";
     const pageCssFiles = page.cssFiles || [];
     const pageJsFiles = page.jsFiles || [];
@@ -341,7 +347,8 @@ const buildReactProjectFiles = (pages, globalCssFiles = [], globalJsFiles = []) 
       pageJsImports.push(`import "./${filename}";`);
     });
 
-    const component = `import React, { useEffect, useRef } from "react";\n${pageCssImports.join("\n")}\n${pageJsImports.join("\n")}\n\nexport default function ${safeName}() {\n  const rootRef = useRef(null);\n  const customJs = ${JSON.stringify(customJs)};\n\n  useEffect(() => {\n    if (!customJs) return;\n    const pageRoot = rootRef.current?.querySelector(\".page-root\") || rootRef.current;\n    try {\n      const fn = new Function(\"pageRoot\", \"document\", \"window\", customJs);\n      const cleanup = fn(pageRoot, document, window);\n      if (typeof cleanup === \"function\") return cleanup;\n    } catch (err) {\n      console.error(\"Custom JS error:\", err);\n    }\n  }, [customJs]);\n\n  return (\n    <div ref={rootRef}>\n      ${styleTag ? styleTag : ""}\n      <div dangerouslySetInnerHTML={{ __html: ${JSON.stringify(html)} }} />\n    </div>\n  );\n}\n`;
+    const componentRuntimeJs = [sliderRuntimeJs, customJs].filter(Boolean).join("\n");
+    const component = `import React, { useEffect, useRef } from "react";\n${pageCssImports.join("\n")}\n${pageJsImports.join("\n")}\n\nexport default function ${safeName}() {\n  const rootRef = useRef(null);\n  const customJs = ${JSON.stringify(componentRuntimeJs)};\n\n  useEffect(() => {\n    if (!customJs) return;\n    const pageRoot = rootRef.current?.querySelector(\".page-root\") || rootRef.current;\n    try {\n      const fn = new Function(\"pageRoot\", \"document\", \"window\", customJs);\n      const cleanup = fn(pageRoot, document, window);\n      if (typeof cleanup === \"function\") return cleanup;\n    } catch (err) {\n      console.error(\"Custom JS error:\", err);\n    }\n  }, [customJs]);\n\n  return (\n    <div ref={rootRef}>\n      ${styleTag ? styleTag : ""}\n      <div dangerouslySetInnerHTML={{ __html: ${JSON.stringify(html)} }} />\n    </div>\n  );\n}\n`;
 
     files.set(`src/pages/${safeName}.jsx`, component);
     pageImports.push(`import ${safeName} from "./pages/${safeName}";`);
